@@ -32,3 +32,10 @@ A Quarkus REST service deployed to Google Cloud Run as a **native image**.
 ## Testing
 `./mvnw test` for JVM tests. Native behaviour can differ, so anything touching
 reflection, resources or static init needs a native integration test too.
+
+## Changelog
+Record every meaningful change in `CHANGELOG.md` — dated entry, newest first.
+Include the *reasoning*, especially for decisions that look arbitrary later
+(region choices, version ceilings, things deliberately not done). The point
+is that a future session can recap what exists without re-deriving it, and
+does not undo a deliberate choice by mistake.

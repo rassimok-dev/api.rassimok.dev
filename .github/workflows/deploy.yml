@@ -10,7 +10,7 @@ permissions:
   id-token: write   # required for Workload Identity Federation
 
 env:
-  REGION: europe-central2      # Warsaw
+  REGION: europe-west4      # Netherlands; Warsaw forbids Cloud Run domain mappings
   SERVICE: api
   REPOSITORY: containers
 
