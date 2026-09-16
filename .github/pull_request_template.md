@@ -1,6 +1,6 @@
 ## What and why
 
-<!-- What changes, and what problem it solves. Link the ticket: Closes LIN-123 -->
+<!-- What changes, and what problem it solves. Link the ticket: Closes RAS-123 -->
 
 ## How to verify
 
