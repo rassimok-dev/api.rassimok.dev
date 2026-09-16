@@ -1,0 +1,28 @@
+# Code owners for api.rassimok.dev
+#
+# Every line matches a path pattern; the last matching line wins.
+# Owners are requested for review automatically when a PR touches their paths.
+#
+# GitHub never requests review from the PR author, so while this is a
+# one-person project these lines are inert. They exist so that the sensitive
+# paths already route correctly the moment a second person joins.
+
+# Default owner for everything not matched below.
+*                                       @rassimok-dev
+
+# Deploy pipeline. This holds the Workload Identity Federation wiring and
+# the Cloud Run flags — including --max-instances, which is the only thing
+# standing between a traffic spike and a real bill.
+/.github/workflows/                     @rassimok-dev
+
+# Native image build. Reintroducing a JVM Dockerfile here would quietly
+# undo the 23 ms startup the whole deployment model depends on.
+/src/main/docker/                       @rassimok-dev
+
+# Runtime config: the port Cloud Run injects, the pinned Mandrel builder
+# (which is what caps this project at Java 25), and the database settings.
+/src/main/resources/application.properties  @rassimok-dev
+
+# Conventions, including the static-initialiser rule that GraalVM makes
+# load-bearing.
+/CLAUDE.md                              @rassimok-dev
