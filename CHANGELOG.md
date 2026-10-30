@@ -5,7 +5,9 @@ or a future session needing to know what already exists and why.
 
 ## 2026-10-30 — Dependency refresh
 
-- **Quarkus 3.39.3 → 3.40.1.1**, the newest stable 3.x platform. Quarkus 4.0
+- **Quarkus 3.39.3 → 3.40.1.1**, the newest stable 3.x platform and an **LTS**
+  stream: the 3.40 migration guide calls it a direct continuation of 3.39
+  with no manual changes expected, which matched. Quarkus 4.0
   exists only as Beta2 and was deliberately not adopted: a beta has no place
   under a deployed service, and the Mandrel `jdk-25` builder pin has to be
   re-validated against 4.0 once it goes GA. The BOM bump carries the managed
