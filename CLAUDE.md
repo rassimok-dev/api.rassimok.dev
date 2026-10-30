@@ -23,6 +23,15 @@ A Quarkus REST service deployed to Google Cloud Run as a **native image**.
 
 `.sdkmanrc` pins the local toolchain: run `sdk env` in this directory.
 
+## Claude Code cloud sessions
+The cloud container ships Java 21, so `.claude/hooks/session-start.sh`
+installs OpenJDK 25 from Ubuntu's archive, points `JAVA_HOME` at it, and
+warms the Maven cache before the session starts. `./mvnw test` therefore
+works from the first turn. The hook only runs when `CLAUDE_CODE_REMOTE` is
+set; local machines keep using `sdk env`. Ubuntu's build rather than Temurin
+because the session's network policy blocks Adoptium, SDKMAN, Corretto and
+Azul; for JVM tests any OpenJDK 25 is equivalent, and CI stays on Temurin.
+
 ## Cloud Run notes
 - The port comes from `$PORT`. Do not hardcode 8080.
 - The service is **stateless** — no disk, requests capped at 60 min.

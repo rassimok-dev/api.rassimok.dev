@@ -3,6 +3,27 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-10-30 — Cloud session toolchain
+
+- Added a Claude Code **SessionStart hook** (`.claude/hooks/session-start.sh`,
+  registered in `.claude/settings.json`). The cloud container ships Java 21
+  and this project compiles with `--release 25`, so until now every cloud
+  session failed at `./mvnw test` before it could do anything useful. An
+  agent that cannot run the tests it writes is flying blind.
+- **OpenJDK 25 comes from Ubuntu's archive**, not Temurin. The session's
+  egress policy blocks Adoptium (API and apt repo), SDKMAN, Corretto and
+  Azul; Ubuntu's archive and Maven Central are allowed. For JVM tests any
+  OpenJDK 25 build is equivalent. Local (`.sdkmanrc`) and CI stay on Temurin.
+- The hook **warms the Maven cache** with `-DskipTests test` and deliberately
+  does not run the tests: the container is snapshotted after the hook, so
+  dependencies download once, but a red test should fail a session's work,
+  not its startup.
+- Hook timeout raised to **600 s** (default is 60 s). A cold run does an apt
+  install plus roughly 200 MB of Quarkus dependencies, which exceeds the
+  default. Warm runs take a few seconds.
+- The hook is a no-op outside cloud sessions (`CLAUDE_CODE_REMOTE` unset), so
+  it never touches a developer's machine.
+
 ## 2026-09-16 — Service created and deployed
 
 **Live:** `https://api-973103193216.europe-west4.run.app` → `api.rassimok.dev` (mapping created, DNS pending)
