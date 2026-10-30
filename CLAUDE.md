@@ -18,7 +18,7 @@ A Quarkus REST service deployed to Google Cloud Run as a **native image**.
 | | |
 |---|---|
 | Java | 25 (LTS, Mandrel ceiling) |
-| Quarkus | 3.39.3 |
+| Quarkus | 3.40.1.1 |
 | PostgreSQL | 18 — pinned but not yet wired |
 
 `.sdkmanrc` pins the local toolchain: run `sdk env` in this directory.

@@ -3,6 +3,28 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-10-30 — Dependency refresh
+
+- **Quarkus 3.39.3 → 3.40.1.1**, the newest stable 3.x platform. Quarkus 4.0
+  exists only as Beta2 and was deliberately not adopted: a beta has no place
+  under a deployed service, and the Mandrel `jdk-25` builder pin has to be
+  re-validated against 4.0 once it goes GA. The BOM bump carries the managed
+  libraries with it (Jackson 2.22.2 → 2.22.4 among others). Tests pass.
+- maven-compiler-plugin 3.15.0 → 3.16.0; surefire/failsafe 3.5.6 → 3.6.1.
+- **GitHub Actions**: checkout v4 → v7, setup-java v4 → v6,
+  google-github-actions/auth v2 → v3, setup-gcloud v2 → v3. All now run on
+  the node24 runtime. Each action's definition was read at the new tag: every
+  input this workflow uses still exists and none is deprecated. setup-java v6
+  verifies JDK download checksums automatically, which is a free win for a
+  keyless deploy pipeline.
+- **Left as is, on purpose**: Maven wrapper 3.9.16 is the latest 3.9.x (a
+  3.10.0 tag exists, but nothing here needs it and the wrapper's SHA-256 pin
+  would need re-verifying); Mandrel builder `jdk-25` is the ceiling (see
+  2026-09-16); `ubi9-quarkus-micro-image:2.0` is the current tag line.
+- No CVE scan was possible from the cloud session (the NVD feed is not
+  reachable there), so "less vulnerable" here means "on the newest supported
+  platform". Enabling Dependabot on the repo would give continuous coverage.
+
 ## 2026-10-30 — Cloud session toolchain
 
 - Added a Claude Code **SessionStart hook** (`.claude/hooks/session-start.sh`,
