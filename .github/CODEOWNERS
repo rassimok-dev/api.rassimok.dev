@@ -22,7 +22,3 @@
 # Runtime config: the port Cloud Run injects, the pinned Mandrel builder
 # (which is what caps this project at Java 25), and the database settings.
 /src/main/resources/application.properties  @rassimok-dev
-
-# Conventions, including the static-initialiser rule that GraalVM makes
-# load-bearing.
-/CLAUDE.md                              @rassimok-dev
