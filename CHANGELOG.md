@@ -3,6 +3,24 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-13 - Agent instructions moved out of the repository
+
+`CLAUDE.md` is removed, and its CODEOWNERS entry with it. Agent instructions
+for this service now live outside the repository, in a private workspace
+that holds every rassimok-dev project, so one set of rules covers all of them
+and a stale copy on an old branch cannot compete with it.
+
+### Decisions worth not relitigating
+
+- **Do not re-add a `CLAUDE.md` or `.claude/` here.** The rules that matter
+  most (native only, Java 25 ceiling, no runtime state in static
+  initialisers, `--max-instances` on deploy) are also in the pull request
+  checklist and in the entry below. A cloud agent session that sees this
+  repository alone gets no instructions, and that trade was accepted.
+- **The `chore/cloud-session-hook` branch is not merged as it stands.** It
+  adds an in-repo `.claude/` SessionStart hook and a `CLAUDE.md` section for
+  cloud sessions, which this decision rules out.
+
 ## 2026-09-16 — Service created and deployed
 
 **Live:** `https://api-973103193216.europe-west4.run.app` → `api.rassimok.dev` (mapping created, DNS pending)
