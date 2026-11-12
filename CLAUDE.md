@@ -14,6 +14,13 @@ A Quarkus REST service deployed to Google Cloud Run as a **native image**.
   freezes the compile moment. Use `@Observes StartupEvent` instead. This class of
   bug passes every JVM test and only appears in production.
 
+- **Supply chain is pinned.** Actions by full commit SHA with a version
+  comment, the base image by digest. Let Dependabot move them; do not swap a
+  SHA back to a tag. Only the `deploy` job may hold `id-token: write`.
+- **Security headers and the 1 KB body limit live in
+  `application.properties`** and are asserted by `StatusResourceTest`. A new
+  endpoint that needs a request body must raise the limit deliberately.
+
 ## Versions
 | | |
 |---|---|

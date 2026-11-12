@@ -1,0 +1,29 @@
+# Keeps every pinned dependency moving: SHA-pinned actions, the digest-pinned
+# base image, and the Quarkus platform and Maven plugins. The cooldown keeps
+# brand-new releases out until they have been public for a while.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    commit-message:
+      prefix: chore
+
+  - package-ecosystem: docker
+    directory: /src/main/docker
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    commit-message:
+      prefix: chore

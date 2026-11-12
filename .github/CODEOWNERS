@@ -23,6 +23,11 @@
 # (which is what caps this project at Java 25), and the database settings.
 /src/main/resources/application.properties  @rassimok-dev
 
+# Security policy and the update bot. Dependabot pull requests touch the
+# deploy pipeline's pins, so they route to the same owner.
+/SECURITY.md                            @rassimok-dev
+/.github/dependabot.yml                 @rassimok-dev
+
 # Conventions, including the static-initialiser rule that GraalVM makes
 # load-bearing.
 /CLAUDE.md                              @rassimok-dev

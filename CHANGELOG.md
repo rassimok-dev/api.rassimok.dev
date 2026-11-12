@@ -3,6 +3,41 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-12 — Hardening
+
+- **Pipeline least privilege.** `id-token: write` moved from the workflow to
+  the deploy job alone, and that job now also requires a `push` event. Before,
+  the test job on every pull request could mint an OIDC token. WIF's
+  repository condition still limited what it could reach, but nothing ran
+  there that needed one.
+- **Actions pinned to commit SHAs**, with `persist-credentials: false`:
+  checkout v7.0.1, setup-java v6.1.0, auth v3.0.0, setup-gcloud v3.0.1. The
+  deploy job holds cloud credentials, so a moved tag here is the expensive
+  kind of supply-chain incident. setup-java is 6.1.0, not 6.2.0, because
+  6.2.0 was eight days old; nothing pinned is newer than two weeks. The same
+  majors as the unmerged `chore/update-dependencies` branch, whose inputs
+  check carries over; its Quarkus bump is still worth taking separately.
+- **Secrets enter scripts as env vars**, not `${{ }}` splices, so no value
+  can change what the shell runs. One deploy at a time via `concurrency`,
+  never cancelled midway; timeouts on both jobs.
+- **Base image pinned by digest.** `ubi9-quarkus-micro-image:2.0` is rebuilt
+  in place for OS patches, so the tag alone could change what ships with no
+  commit. Pinned to the digest the tag pointed at on 2026-11-12, which is
+  what deploys were already pulling. Dependabot proposes each rebuild.
+- **Response headers** on every path: `nosniff`, `X-Frame-Options: DENY`, a
+  deny-all CSP with `frame-ancestors 'none'`, `no-referrer`, HSTS, CORP
+  `same-site`, a restrictive Permissions-Policy; `Cache-Control: no-store`
+  on `/status`. Runtime config only, so native and JVM behave the same.
+- **Request bodies capped at 1 KB.** Every endpoint is a GET; the 10 MB
+  default was memory an anonymous client could make each instance buffer.
+- **Tests** assert the headers, the cache rule, the 413 on large bodies and
+  the 405 on non-GET methods. Removing a header or the limit fails them
+  (checked).
+- **Dependabot** for actions, the Dockerfile digest and Maven, with a 14-day
+  cooldown on actions and Maven. **`SECURITY.md`** points at GitHub private
+  vulnerability reporting, which must be switched on in settings.
+- Full history scanned for credentials: nothing found.
+
 ## 2026-09-16 — Service created and deployed
 
 **Live:** `https://api-973103193216.europe-west4.run.app` → `api.rassimok.dev` (mapping created, DNS pending)
