@@ -10,9 +10,15 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.sql.DataSource;
 import java.sql.SQLException;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -156,6 +162,25 @@ class ResultsResourceTest {
         // then
         clear.statusCode(429).body("error", equalTo(ApiException.RATE_LIMITED));
         run.statusCode(429).body("error", equalTo(ApiException.RATE_LIMITED));
+        assertThat(storedSubmissions(playerId(token)), equalTo(30L));
+    }
+
+    @Test
+    void shouldAcceptOnlyThirty_whenSubmitClear_givenFortyParallelClears() throws InterruptedException, SQLException {
+        // given
+        String token = TestPlayers.createGuest("Burst", Rules.KIND_HUMAN);
+        List<Callable<Integer>> clears = Collections.nCopies(40,
+                () -> submit("/clears", token, CLEAR).extract().statusCode());
+
+        // when
+        Map<Integer, Long> statusCounts;
+        try (ExecutorService executor = Executors.newFixedThreadPool(clears.size())) {
+            statusCounts = executor.invokeAll(clears).stream()
+                    .collect(Collectors.groupingBy(Future::resultNow, Collectors.counting()));
+        }
+
+        // then
+        assertThat(statusCounts, equalTo(Map.of(201, 30L, 429, 10L)));
         assertThat(storedSubmissions(playerId(token)), equalTo(30L));
     }
 

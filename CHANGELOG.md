@@ -50,9 +50,12 @@ read the boards. The game calls these through the site's proxy at
   errors are named after their HTTP status: `not_found`,
   `method_not_allowed`, `unsupported_media_type`, `bad_request` for a body
   that is not JSON at all, and `internal_server_error`, which is logged.
+  The one exception is 413 for a body over 4 KB: it carries the three
+  headers but no body.
 - Tests: unit tests for the nick, kind and result checks. `@QuarkusTest`
   classes cover the cookie, the session refresh, every endpoint, ordering,
-  kinds apart, the rate limit, delete, a database failure and the headers.
+  kinds apart, the rate limit (also 40 clears sent in parallel), delete, a
+  database failure, the body limit and the headers.
   Two native tests run the same HTTP checks against the binary.
   `KladRoundTripIT` creates guests (NFKC and Cyrillic nicks), submits a
   clear and a run, reads all three boards, renames and deletes.
@@ -79,8 +82,13 @@ read the boards. The game calls these through the site's proxy at
 - **The chests board counts the newest revision that anyone cleared**, for
   each level and shape, across both kinds. A changed layout resets its
   share of everyone's total the moment the first clear of the new revision
-  arrives. A forged clear with revision 1000 does the same; scores are
-  forgeable anyway, which the plan accepts.
+  arrives. A forged clear does more harm than a forged score: one clear
+  with any higher revision, from any guest, removes that level and shape
+  from every player's total on both kinds' boards. Ten such clears leave
+  only the forger on the board. It stays so until the forged rows are
+  deleted, by the forger's `DELETE /players/me` or by hand in the
+  database. The level boards are not affected, because the game asks for
+  its own revision.
 - **No CORS.** The game reaches the API through the same origin (the
   site's proxy), so no browser needs a cross-origin answer. Scripts and
   agents can call `api.rassimok.dev` directly, which is fine. A
@@ -101,6 +109,24 @@ read the boards. The game calls these through the site's proxy at
   any body that is not JSON.
 - **`nick_taken` is not checked yet.** Nicks may repeat until account nicks
   become unique in the accounts work, as the contract says.
+- **Request bodies are capped at 4 KB** (`quarkus.http.limits.max-body-size`).
+  Real bodies are under 200 bytes. The 10 MB default let anonymous
+  requests fill an instance's 256 MiB: a 10 MB body parsed into a JSON
+  tree held about 309 MB on the JVM (measured in review). Vert.x answers
+  413 itself, so the reply has the three headers but no JSON body. A
+  chunked body over the limit also logs two errors: the JSON reader fails
+  after the 413 is sent, reaches the generic mapper, and Quarkus then logs
+  that the response was already written. Only oversized bodies cause this.
+- **Pooled connections idle for over a minute are checked when taken**
+  (`quarkus.datasource.jdbc.foreground-validation-interval=1M`). Neon
+  suspends after 5 idle minutes, and a connection held across that is
+  assumed dead, so the first request after a quiet spell would answer 500.
+  A connection that fails the check is dropped and another is taken.
+  `max-lifetime`, idle removal and background validation all run on a
+  background timer, which gets no CPU while Cloud Run throttles an idle
+  instance, so they cannot fix this. `validate-on-borrow` would also work,
+  but it adds a round trip to Neon to every request, and its own docs
+  advise against it.
 
 ## 2026-11-13 (later) - PostgreSQL wired, first migration, native tests and smoke test in the deploy
 

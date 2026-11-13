@@ -147,6 +147,22 @@ class BoardsResourceTest {
     }
 
     @Test
+    void shouldDropOlderRevisionShare_whenGetChests_givenNewerRevisionClearedByOtherKind() {
+        // given
+        String human = TestPlayers.createGuest("Human", Rules.KIND_HUMAN);
+        clear(human, 1, Rules.SHAPE_LANDSCAPE, 1, 900, 5, 5);
+        clear(human, 2, Rules.SHAPE_LANDSCAPE, 1, 900, 3, 4);
+        clear(TestPlayers.createGuest("Agent", Rules.KIND_AGENT), 1, Rules.SHAPE_LANDSCAPE, 2, 900, 1, 5);
+
+        // when
+        ValidatableResponse response = given().when().get("/boards/chests").then();
+
+        // then
+        response.statusCode(200)
+                .body("entries", contains(Map.of("rank", 1, "nick", "Human", "guest", true, "chests", 3)));
+    }
+
+    @Test
     void shouldBreakTiesByNickKey_whenGetChests() {
         // given
         for (String nick : List.of("carol", "Alice", "bob")) {
