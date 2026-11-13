@@ -32,6 +32,10 @@ class ResponseHeadersTest {
 
     private static final String CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'";
     private static final String PLAYER_BODY = "{\"nick\":\"Bob\",\"kind\":\"human\"}";
+    // Never a valid email or code: on the binary these tests run without the
+    // mock mailbox, so they must never send a mail.
+    private static final String CODE_BODY = "{\"email\":\"nobody\"}";
+    private static final String VERIFY_BODY = "{\"email\":\"nobody@example.com\",\"code\":\"123456\"}";
 
     @TestHTTPResource("/clears")
     URI clearsUri;
@@ -41,6 +45,9 @@ class ResponseHeadersTest {
 
     @TestHTTPResource("/players/me")
     URI playerUri;
+
+    @TestHTTPResource("/logout")
+    URI logoutUri;
 
     static Stream<Arguments> errors() {
         return Stream.of(
@@ -61,7 +68,10 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/clears", "application/json", "{\"level\":", 400, "bad_request"),
                 Arguments.of("POST", "/runs", "application/json", "[1,", 400, "bad_request"),
                 Arguments.of("GET", "/players/me", null, null, 401, "no_session"),
-                Arguments.of("GET", "/boards/level?level=x", null, null, 400, "invalid_query"));
+                Arguments.of("GET", "/boards/level?level=x", null, null, 400, "invalid_query"),
+                Arguments.of("POST", "/login/code", "application/json", CODE_BODY, 400, "invalid_email"),
+                Arguments.of("POST", "/login/verify", "application/json", VERIFY_BODY, 400, "invalid_code"),
+                Arguments.of("POST", "/logout", null, null, 401, "no_session"));
     }
 
     // Every endpoint that reads a JSON body belongs here. Routing already
@@ -75,7 +85,11 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/clears", null, "{\"level\":1}"),
                 Arguments.of("POST", "/clears", "application/octet-stream", "{\"level\":1}"),
                 Arguments.of("POST", "/runs", null, "{\"levelsCleared\":1}"),
-                Arguments.of("POST", "/runs", "application/octet-stream", "{\"levelsCleared\":1}"));
+                Arguments.of("POST", "/runs", "application/octet-stream", "{\"levelsCleared\":1}"),
+                Arguments.of("POST", "/login/code", null, CODE_BODY),
+                Arguments.of("POST", "/login/code", "application/octet-stream", CODE_BODY),
+                Arguments.of("POST", "/login/verify", null, VERIFY_BODY),
+                Arguments.of("POST", "/login/verify", "application/octet-stream", VERIFY_BODY));
     }
 
     // A valid player body, so only the size can refuse it. The input stream
@@ -157,6 +171,29 @@ class ResponseHeadersTest {
 
         // then
         assertThat(response.statusCode(), equalTo(204));
+        given().cookie(TestPlayers.COOKIE, token).when().get("/players/me")
+                .then().statusCode(401).body("error", equalTo(ApiException.NO_SESSION));
+    }
+
+    @Test
+    void shouldLogOut_whenLogout_givenEmptyChunkedBodyWithoutContentType() throws Exception {
+        // given
+        String token = TestPlayers.createGuest("Chunked", Rules.KIND_HUMAN);
+        HttpRequest request = HttpRequest.newBuilder(logoutUri)
+                .header("Cookie", TestPlayers.COOKIE + "=" + token)
+                .POST(HttpRequest.BodyPublishers.ofInputStream(() -> new ByteArrayInputStream(new byte[0])))
+                .build();
+
+        // when
+        HttpResponse<String> response;
+        try (HttpClient client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()) {
+            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+
+        // then
+        assertThat(response.statusCode(), equalTo(204));
+        assertThat(response.headers().firstValue("Content-Type"), equalTo(Optional.empty()));
+        assertThat(response.body(), equalTo(""));
         given().cookie(TestPlayers.COOKIE, token).when().get("/players/me")
                 .then().statusCode(401).body("error", equalTo(ApiException.NO_SESSION));
     }

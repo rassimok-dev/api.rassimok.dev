@@ -3,6 +3,186 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-13 (fourth) - Email login with 6-digit codes
+
+A guest can verify an email address and so become an account that works on
+any device. Paths are the API's own; the game calls them through the site's
+proxy.
+
+- `POST /login/code` `{"email"}` answers `202 {}` for every valid email and
+  mails a 6-digit code. `400 invalid_email`, `429 rate_limited`.
+- `POST /login/verify` `{"email","code"}` answers 200 with the player plus
+  `"merged":false` and a new session cookie. If the email has an account,
+  this device is logged into it. Otherwise the device's guest becomes the
+  account (its email is set). Errors: `400 invalid_code` (wrong, expired,
+  used or no code), `429 too_many_attempts` on the fifth wrong attempt,
+  which deletes the code, `409 nick_taken` when an account already holds
+  the guest's nick key, `401 no_session` when there is no account and no
+  guest on this device. The guest merge is the accounts work's next step;
+  until then a guest on a device that logs into another account is left
+  alone.
+- `POST /logout` reads no body, deletes the session row, clears the cookie
+  (`Max-Age=0`) and answers 204. `401 no_session` without a session.
+- Email: trimmed, lower case, at most 254 characters, one `@` with text on
+  both sides. Spaces, control characters and `< > ( ) [ ] , ; : " \` are
+  refused too.
+- Code: 6 digits from `SecureRandom`, valid 10 minutes, stored as the
+  SHA-256 of `email + ":" + code` in lower-case hex, compared with
+  `MessageDigest.isEqual`. A new request replaces the email's code. In
+  `POST /login/verify` the code must be a JSON string of exactly 6 ASCII
+  digits; anything else (a JSON number such as `123456`, `null`, 5 or 7
+  digits, a space, Arabic-Indic or full-width digits) is `400 invalid_code`
+  and counts no attempt.
+- Limits, counted in the database: 3 codes per email per hour, 80 mails a
+  day overall. All bounds sit in `Rules`. Every valid code request, a
+  refused one too, first deletes send-log rows older than a day and expired
+  codes. A code request that waits more than 2 s for its lock answers
+  `429 rate_limited` too.
+- A failed send answers `500 internal_server_error` and logs one line with
+  the root cause's class name and the SMTP reply code, never the exception
+  or its text.
+- No table holds the address for a code request. `login_code` is keyed by
+  the SHA-256 of the normalised email (lower-case hex) and the send log
+  keeps the same hash; the address is stored only in `player.email`, when a
+  verify turns a guest into an account. The API sends no mail but the login
+  code.
+- Migration `V3` adds `login_code` (one row per email: `email_hash`, code
+  hash, attempts, expiry, creation) and `login_mail`, the send log (SHA-256
+  of the email and the send time). `V1` and `V2` are unchanged.
+- Mail: the `mailer` extension from the Quarkus BOM, SMTP to
+  `smtp.resend.com:465` with TLS, user `resend`, password from
+  `RESEND_SMTP_KEY` (prod only). From `КЛАД <klad@mail.rassimok.dev>`;
+  plain Russian text with the code and its 10 minutes, no links, no HTML.
+  Dev and test use the mock mailbox (`%dev` and `%test` only). The
+  extension brings `qute` along (for mail templates, unused here).
+- Deploy: `--set-secrets` also maps `RESEND_SMTP_KEY=resend-smtp-key:latest`
+  (one flag, comma-separated, as `--set-secrets` replaces the whole set).
+  `api-runtime` already had access to the secret.
+- Tests: unit tests for the email check, the code hash (against a vector
+  from `shasum`), expiry, the generated code's format, the accepted code
+  (6 ASCII digits only), the mail text and both limit windows on a fixed
+  clock.
+  `LoginResourceTest` (with the mock mailbox) covers the sent mail and what
+  is stored, a scan of every table for the address after a code request
+  (none holds it) and after a verify (only `player`), invalid emails, the
+  replaced code, wrong codes, a numeric and other malformed codes (no
+  attempt counted, the right string still works), four wrong then right,
+  the fifth wrong, 10 parallel guesses, expiry, a used code, both limits
+  and their windows, old rows deleted on a refused request, 10 parallel
+  code requests, a guest becoming an account, a second device, an account
+  with a guest on the device, `nick_taken`, `no_session`, and logout; verify
+  and logout send no mail. It also covers a code request while a verify
+  holds and then deletes the code row (202 and a new code), and one that
+  waits past the lock timeout (429, and the next request works).
+  `LoginMailFailureTest` sends through a local SMTP stub that refuses the
+  recipient and repeats the address in its reply: 500, one log line from
+  `LoginResource`, no logged throwable, the address in no log record.
+  `DatabaseMigrationTest` pins the `login_code` columns and its
+  `email_hash` key.
+  `ResponseHeadersTest` has the 415 rows for both login bodies, the error
+  rows, and logout with an empty chunked body and no type (204, no
+  `Content-Type`). `LoginRoundTripIT` requests and verifies codes against
+  the native binary.
+
+### Decisions worth not relitigating
+
+- **SMTP, not Resend's HTTP API.** Quarkus Mailer is in the BOM, so no new
+  library; it has a mock mailbox the tests read; and the provider stays a
+  matter of four properties. Port 465 is TLS from the first byte; STARTTLS
+  on 587 opens in plain text and upgrades.
+- **`202` for every valid email.** A mail goes out whether or not an account
+  exists, so the answer never tells anyone who plays here. A new address
+  needs the mail anyway to sign up.
+- **Verify checks the code before anything else.** Only a correct code
+  reveals whether the email has an account (200 against 401 or 409).
+  Checking the session first would let anyone probe emails with a wrong
+  code.
+- **A correct code is used up even when the answer is 401 or 409.** One
+  rule ("used codes are deleted"); the contract already has the game ask
+  for a new code after `nick_taken`. So the game must create its guest
+  before it asks for a code: a code answered with 401 is gone.
+- **Verify keeps its writes when it answers an error**
+  (`@Transactional(dontRollbackOn = ApiException.class)`). Otherwise the
+  counted attempt and the deleted code would roll back with the error, and
+  attempts would never add up.
+- **Locks, because up to three instances serve requests.** A code request
+  takes `lock table login_mail in exclusive mode` before counting, so
+  requests count one after another; verify locks the email's code row, and
+  so does the code request before it replaces the code. Measured without
+  them: 10 parallel requests for one email gave one 202 and nine 500s (the
+  per-email row raced), and 10 parallel wrong guesses all got 400: the
+  attempt counts overwrote each other, the fifth was never reached and the
+  code survived. With them: three 202s and seven 429s, and exactly one 429
+  among the guesses. Without the row lock in the code request, a verify
+  that deleted the row first made the request's update find nothing (500).
+  Code requests are few, so a lock over all of them costs nothing.
+- **A 2 s lock timeout on code requests** (`set local lock_timeout`, so it
+  ends with the transaction, also on a pooled connection). Every waiter
+  holds a pooled connection, so an anonymous flood could otherwise use up
+  the pool and stall boards and results. A timed-out request answers
+  `429 rate_limited`, also when the wait is for the code row; Hibernate
+  still logs two warnings, the SQL state `55P03` and PostgreSQL's "canceling
+  statement due to lock timeout", with no address.
+- **The mail goes out after the code is committed.** No lock is held while
+  Resend answers (the blocking mailer waits up to 60 s). A failed send
+  answers 500, keeps the stored code and still counts toward the limits,
+  which errs on the side of the mail quota.
+- **A failed send logs no exception text.** The mail server's reply is in
+  the exception's message (`recipient address not accepted: 550 ...`), and
+  replies often repeat the address; logged as a throwable it would put the
+  address in Cloud Logging for 30 days, against the contract's "no address
+  stored for a code request". So `requestCode` logs only the root cause's
+  class and the SMTP reply code (0 when there is none), which tells a
+  refused recipient (550) from a refused key (535). For the same reason
+  `quarkus.mailer.mock` (it logs every mail with recipient and code) and
+  `quarkus.mailer.log-invalid-recipients` stay off in prod.
+- **A code request stores hashes, never the address** (contract section 5,
+  decided 2026-11-13 after the RAS-25 review; the site's privacy note
+  promises it). An address that asks for a code and never verifies leaves
+  only hashes, which go with the next code request once they are outdated:
+  `login_code` and the send log both key on the SHA-256 of the normalised
+  address, and the code hash still binds email and code. Both only need to
+  recognise an address again, which a hash does.
+  The address is written only into `player.email`, by a verify that makes
+  an account. An unsalted hash still lets someone holding the tables test a
+  known address; it keeps the list of addresses out of them.
+- **`V3` was changed in place.** It had run only in tests (Dev Services
+  starts an empty database each time), never against Neon, so no database
+  holds the old checksum. Once it has run anywhere real, a change needs a
+  new migration.
+- **A malformed code counts no attempt.** It can never be the right code
+  and is refused before the row is read, with the same `400 invalid_code`
+  whether or not a code exists, so it reveals nothing; counting it would let
+  a broken client use up a player's five attempts.
+- **Old rows go on every code request, a refused one too.** The privacy
+  note promises that outdated records go with the next code request, and a
+  429 is one. `issue` deletes send-log rows older than a day and expired
+  codes before it counts, and `dontRollbackOn = ApiException.class` keeps
+  those deletes when the answer is 429. Nothing runs between requests, so a
+  day is not a hard bound.
+- **80 mails a day.** Resend's free plan allows 100 a day and 3,000 a month;
+  80 leaves room for test mails sent by hand, and 30 days of 80 stay under
+  the monthly cap.
+- **Constant-time comparison** with `MessageDigest.isEqual`. With 5 attempts
+  per 10-minute code the timing would reveal little, but the comparison
+  costs nothing.
+- **Logging in rotates the device's session.** Verify deletes the session
+  the device sent and sets a new cookie, so a token issued before the login
+  stops working. A guest left alone on that device keeps its row.
+- **An account on the device and an email without an account gives 401
+  `no_session`.** An account cannot take a second address, and the contract
+  allows only a guest to become an account.
+- **The email check is stricter than "one `@`".** Spaces, control
+  characters and the characters that separate or decorate addresses in a
+  mail header are refused, so an address can never add a recipient or a
+  header line.
+- **The mock mailbox is never on in prod.** The native integration tests
+  run the binary with the prod profile, so `LoginRoundTripIT` turns the mock
+  on through a test resource (`MockMailer`) and reads the code from the mock
+  mailbox's log line in `target/quarkus.log`. A missing `RESEND_SMTP_KEY`
+  does not stop the service: the other native tests start the binary
+  without it. The deploy always sets it.
+
 ## 2026-11-13 (later still) - Guest players, results and leaderboards for klad
 
 The game can now create a guest, submit level clears and finished runs, and

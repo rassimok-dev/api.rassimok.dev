@@ -69,7 +69,7 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --service-account api-runtime@rassimok-dev.iam.gserviceaccount.com \
-            --set-secrets KLAD_DB_URL=klad-db-url:latest \
+            --set-secrets KLAD_DB_URL=klad-db-url:latest,RESEND_SMTP_KEY=resend-smtp-key:latest \
             --max-instances 3 \
             --min-instances 0 \
             --memory 256Mi \

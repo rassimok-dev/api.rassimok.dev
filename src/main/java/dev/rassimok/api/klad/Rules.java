@@ -39,6 +39,16 @@ final class Rules {
 
     static final int BOARD_SIZE = 20;
 
+    static final int EMAIL_MAX_LENGTH = 254;
+    static final Duration CODE_LIFETIME = Duration.ofMinutes(10);
+    static final int CODE_ATTEMPTS = 5;
+    static final int CODES_PER_EMAIL = 3;
+    static final Duration CODES_PER_EMAIL_WINDOW = Duration.ofHours(1);
+    // Resend's free plan sends 100 mails a day; the rest is left for test
+    // mails sent by hand.
+    static final int MAILS_PER_DAY = 80;
+    static final Duration MAILS_PER_DAY_WINDOW = Duration.ofDays(1);
+
     private Rules() {
     }
 
