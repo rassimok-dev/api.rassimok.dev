@@ -83,6 +83,12 @@ public class RoomStore {
         }
     }
 
+    // The player is gone for good (deleted, merged or signed out): out of
+    // their room in any state, with the host handover of a leave.
+    synchronized void forget(UUID playerId) {
+        leaveCurrentRoom(playerId, clock.instant());
+    }
+
     // To a player who is not in it, the room is not found.
     synchronized RoomView setReady(String roomId, LobbyPlayer player, boolean isReady) {
         Instant now = clock.instant();

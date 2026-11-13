@@ -35,6 +35,8 @@ import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.emptyString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -347,6 +349,69 @@ class RoomResourceTest {
         left.statusCode(204);
         find(second, id).statusCode(200).body("", equalTo(room(id, LOBBY, "Second",
                 List.of(member("Second", false, true), member("Third", false, false)))));
+    }
+
+    @Test
+    void shouldShowEmptyRoom_whenFind_givenOnlyMemberLeft() {
+        // given
+        String host = guest(HOST);
+        String other = guest(GUEST);
+        String id = createRoom(host);
+        post(host, "/rooms/" + id + "/leave").statusCode(204);
+
+        // when
+        ValidatableResponse found = find(other, id);
+
+        // then
+        Map<String, Object> expected = new HashMap<>();
+        expected.put("id", id);
+        expected.put("state", LOBBY);
+        expected.put("host", null);
+        expected.put("players", List.of());
+        expected.put("level", Rules.LEVEL_MIN);
+        expected.put("shape", Rules.SHAPE_LANDSCAPE);
+        expected.put("size", Rules.ROOM_SIZE);
+        found.statusCode(200).body("", equalTo(expected));
+    }
+
+    @Test
+    void shouldRemovePlayerAtOnce_whenDeleteAccount_givenPlayerInRoom() {
+        // given
+        String host = guest(HOST);
+        String leavingNick = TestPlayers.uniqueNick("Leaving");
+        String leaving = guest(leavingNick);
+        String id = createRoom(host);
+        join(leaving, id).statusCode(200);
+        post(leaving, "/presence").statusCode(204);
+
+        // when
+        given().cookie(TestPlayers.COOKIE, leaving).when().delete("/players/me").then().statusCode(204);
+
+        // then
+        find(host, id).statusCode(200)
+                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, false, true)))));
+        given().cookie(TestPlayers.COOKIE, host).when().get("/presence").then().statusCode(200)
+                .body("players.nick", not(hasItem(leavingNick)));
+    }
+
+    @Test
+    void shouldRemovePlayerAtOnce_whenLogout_givenPlayerInRoom() {
+        // given
+        String host = guest(HOST);
+        String leavingNick = TestPlayers.uniqueNick("Leaving");
+        String leaving = guest(leavingNick);
+        String id = createRoom(host);
+        join(leaving, id).statusCode(200);
+        post(leaving, "/presence").statusCode(204);
+
+        // when
+        post(leaving, "/logout").statusCode(204);
+
+        // then
+        find(host, id).statusCode(200)
+                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, false, true)))));
+        given().cookie(TestPlayers.COOKIE, host).when().get("/presence").then().statusCode(200)
+                .body("players.nick", not(hasItem(leavingNick)));
     }
 
     @Test

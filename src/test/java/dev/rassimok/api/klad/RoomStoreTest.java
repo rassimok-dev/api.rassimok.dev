@@ -439,6 +439,45 @@ class RoomStoreTest {
     }
 
     @Test
+    void shouldRemovePlayerAndHandOverHost_whenForget_givenHostInLobby() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.join(id, carol);
+
+        // when
+        rooms.forget(alice.id());
+
+        // then
+        assertThat(rooms.find(id, bob),
+                equalTo(roomSeenBy(bob, id, LOBBY, bob, member(bob, false, true), member(carol, false, false))));
+    }
+
+    @Test
+    void shouldRemovePlayerAndHandOverHost_whenForget_givenRoomStarting() {
+        // given
+        String id = startedRoom();
+
+        // when
+        rooms.forget(alice.id());
+
+        // then
+        assertThat(rooms.find(id, bob), equalTo(room(id, STARTING, bob, member(bob, true, true))));
+    }
+
+    @Test
+    void shouldChangeNothing_whenForget_givenPlayerInNoRoom() {
+        // given
+        String id = rooms.create(alice);
+
+        // when
+        rooms.forget(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, false, true))));
+    }
+
+    @Test
     void shouldAnswerNotFound_whenLeave_givenUnknownId() {
         // when
         ApiException exception = assertThrows(ApiException.class, () -> rooms.leave(UNKNOWN_ID, alice));

@@ -108,6 +108,9 @@ most one.
   through idle periods at the price of an always-billed instance; not done
   (user decision). The result endpoints keep counting their rate limit in
   the database, which outlives a restart and is shared across a rollout.
+  The per-instance limits are now global because there is one instance
+  (2 concurrent login-code requests, 20 sockets, Cloud Run concurrency 80)
+  and they fail closed: past them the answer is a refusal.
 - **Lazy cleanup, all rooms at once.** A scheduler would be a new moving
   part and a test with a fake clock could not see it run. Sweeping every
   room on each access is at most 100 rooms of 4 members, so the cap always
@@ -121,8 +124,9 @@ most one.
   creating and leaving, 200 requests, and block rooms for everyone for ten
   minutes. So the last host's next `POST /rooms` still closes the empty
   room. Two sessions that hand a room to each other can still pile up
-  empty rooms (about 400 requests to the cap); the cap then answers 429, as
-  the contract allows. Whoever joins an empty room becomes its host; its
+  empty rooms (about 300 requests to the cap); 100 fresh guests are the
+  cheaper route (about 200 requests, healing about 11 minutes after they
+  stop). The cap then answers 429, as the contract allows. Whoever joins an empty room becomes its host; its
   `host` is `null` while it is empty.
 - **The sweep runs before the caller counts as seen.** A member silent for
   over 60 s who polls again is already out and sees the room without
@@ -147,9 +151,15 @@ most one.
   (it suspends after 5 idle minutes).
 - **Not done here:** nothing moves a room out of `starting` yet. Until
   RAS-32 such a room keeps its members and its place under the cap until
-  they leave or the host opens a new room. A player who deletes their nick
-  or logs out stays in the presence list and in a lobby room until the
-  60 s rules drop them.
+  they leave or the host opens a new room.
+- **Delete, merge and logout remove the player at once.** `DELETE
+  /players/me`, a guest merged into an account by `login/verify`, and
+  `POST /logout` call `forget` on both stores: the player leaves the
+  presence list and their room (in any state, with the host handover of a
+  leave) at once, so a deleted nick does not linger for the 60 s rules. The
+  stores never call the database, so the call is safe inside the
+  transaction. A request of the same player already in flight can still
+  put the entry back; the 60 s rules then drop it.
 
 ## 2026-11-13 (seventh) - WebSocket echo spike at /race/echo
 

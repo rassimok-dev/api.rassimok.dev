@@ -50,6 +50,10 @@ public class PresenceStore {
         entries.put(player.id(), new Entry(player, now));
     }
 
+    synchronized void forget(UUID playerId) {
+        entries.remove(playerId);
+    }
+
     synchronized PresenceView online() {
         removeExpired(clock.instant());
         List<OnlinePlayer> players = entries.values().stream()

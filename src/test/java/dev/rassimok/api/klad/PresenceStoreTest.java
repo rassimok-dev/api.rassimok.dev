@@ -74,6 +74,19 @@ class PresenceStoreTest {
     }
 
     @Test
+    void shouldDropOnlyThatPlayer_whenForget_givenTwoPlayersOnline() {
+        // given
+        presence.heartbeat(ALICE);
+        presence.heartbeat(BOB);
+
+        // when
+        presence.forget(ALICE.id());
+
+        // then
+        assertThat(presence.online(), equalTo(view(online(BOB))));
+    }
+
+    @Test
     void shouldCountFromLastHeartbeat_whenOnline_givenSecondHeartbeat() {
         // given
         presence.heartbeat(ALICE);
