@@ -51,6 +51,7 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/players", "*/*", PLAYER_BODY, 415, "unsupported_media_type"),
                 Arguments.of("POST", "/players", "application/*", PLAYER_BODY, 415, "unsupported_media_type"),
                 Arguments.of("POST", "/players", "application/json; version=2", PLAYER_BODY, 415, "unsupported_media_type"),
+                Arguments.of("GET", "/boards/records", "garbage", "x", 415, "unsupported_media_type"),
                 Arguments.of("POST", "/players", "application/json", "{\"nick\":", 400, "bad_request"),
                 Arguments.of("POST", "/players", "application/json", "{\"nick\":\"Bob\",\"kind\":[1]}", 400, "invalid_kind"),
                 Arguments.of("POST", "/players", "application/json", "{\"nick\":12345,\"kind\":\"human\"}", 400, "invalid_nick"),

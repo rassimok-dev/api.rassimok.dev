@@ -1,6 +1,7 @@
 package dev.rassimok.api.klad;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
+import io.vertx.core.http.HttpServerResponse;
 import jakarta.inject.Singleton;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -10,6 +11,7 @@ import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 import org.jboss.resteasy.reactive.server.ServerRequestFilter;
 
+import java.io.IOException;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -39,9 +41,20 @@ public class Errors {
     @ServerRequestFilter
     public Optional<Response> refuseNonJsonBody(ContainerRequestContext request) {
         boolean hasBody = 0 < request.getLength() || null != request.getHeaderString("Transfer-Encoding");
-        boolean shouldRefuse = hasBody && !isJson(request.getMediaType());
+        boolean shouldRefuse = hasBody && !isJson(parsedMediaType(request));
         Response.Status status = Response.Status.UNSUPPORTED_MEDIA_TYPE;
         return shouldRefuse ? Optional.of(response(status, codeFor(status))) : Optional.empty();
+    }
+
+    // getMediaType throws on a type that does not parse; that is not JSON either.
+    private static MediaType parsedMediaType(ContainerRequestContext request) {
+        MediaType mediaType;
+        try {
+            mediaType = request.getMediaType();
+        } catch (IllegalArgumentException e) {
+            mediaType = null;
+        }
+        return mediaType;
     }
 
     // Only application/json with at most a charset. MediaType.isCompatible
@@ -67,6 +80,17 @@ public class Errors {
                 .type(MediaType.APPLICATION_JSON)
                 .entity(new ErrorBody(code))
                 .build();
+    }
+
+    // A chunked body over the limit fails the JSON reader after Vert.x has
+    // already sent the 413. Rethrown, Quarkus logs it at debug level only;
+    // mapped, it would log two error stacks for every such request.
+    @ServerExceptionMapper
+    public Response mapIOException(IOException exception, HttpServerResponse response) throws IOException {
+        if (response.headWritten()) {
+            throw exception;
+        }
+        return mapUnexpected(exception);
     }
 
     @ServerExceptionMapper

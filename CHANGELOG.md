@@ -59,7 +59,9 @@ read the boards. The game calls these through the site's proxy at
   endpoint, ordering, kinds apart, the rate limit (also 40 clears sent in
   parallel), a forged revision, clears of another revision left in the
   table, delete, a database failure, the content types, the body limit and
-  the headers.
+  the headers. `BodyLimitLogTest` checks that a chunked body over the limit
+  logs no warning or error; it runs on the JVM only, where the test can
+  read the log.
   Two native tests run the same HTTP checks against the binary.
   `KladRoundTripIT` creates guests (NFKC and Cyrillic nicks), submits a
   clear and a run, reads all three boards, renames and deletes.
@@ -124,17 +126,25 @@ read the boards. The game calls these through the site's proxy at
   any other type. It compares type and subtype itself and allows only a
   `charset` parameter: `MediaType.isCompatible` would let `*/*` and
   `application/*` through, and `application/json; version=2` is not the
-  contract's type either.
+  contract's type either. A type that does not parse at all (`garbage`)
+  gets 415 too; found in review, it threw while the filter read it and
+  answered 500 with an error stack in the log, from any anonymous client.
 - **`nick_taken` is not checked yet.** Nicks may repeat until account nicks
   become unique in the accounts work, as the contract says.
 - **Request bodies are capped at 4 KB** (`quarkus.http.limits.max-body-size`).
   Real bodies are under 200 bytes. The 10 MB default let anonymous
   requests fill an instance's 256 MiB: a 10 MB body parsed into a JSON
   tree held about 309 MB on the JVM (measured in review). Vert.x answers
-  413 itself, so the reply has the three headers but no JSON body. A
-  chunked body over the limit also logs two errors: the JSON reader fails
-  after the 413 is sent, reaches the generic mapper, and Quarkus then logs
-  that the response was already written. Only oversized bodies cause this.
+  413 itself, so the reply has the three headers but no JSON body. With a
+  chunked body the JSON reader then fails with an `IOException`. A mapper
+  for it hands the exception back to Quarkus once the response has been
+  sent, and Quarkus logs it at debug level only. Before that (found in
+  review), the generic mapper logged it as an error and Quarkus logged a
+  second error for the response already written: about 60 lines and
+  6.6 KB of log per request, needing no session. A script could have
+  multiplied log ingestion, which Cloud Logging bills above the free
+  allowance, and buried real errors. Any other `IOException` while the
+  response is still open stays a logged 500.
 - **Pooled connections idle for over a minute are checked when taken**
   (`quarkus.datasource.jdbc.foreground-validation-interval=1M`). Neon
   suspends after 5 idle minutes, and a connection held across that is
