@@ -3,6 +3,232 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-13 (ninth) - Race socket at /race/<room>, the echo spike removed
+
+Players in a room race on their own copies of the same level, and the API
+relays their positions and decides who finished first (RAS-32, contract
+section 8). The socket opens only for the race; the lobby stays REST. The
+server never simulates the game.
+
+- `GET /race/<room>` with `Upgrade: websocket` (`RaceSocket`), reached by the
+  game as `wss://rassimok.dev/klad/api/race/<room>`. It registers through
+  `WebSocketHandshakeCheck.upgrade` like every socket route, so it has every
+  guard of the spike, in the same order: no answer for a second handshake on
+  a connection that holds a socket, 400 (a body), 426 (another version), 503
+  (20 sockets), 403 (Origin), 401 (session). Then the room: 404 for an
+  unknown room, 409 for a player who is not a member or a room that is not
+  `starting` or `racing`. Both give the slot back through the one release
+  helper before the answer ends, like the other refusals.
+- Messages are JSON objects in text frames, read with Vert.x `JsonObject`
+  (no new dependency). Client to server: `ping` (answered `pong`), `pos`
+  with `x`, `y` (finite numbers, fractions allowed) and `tick`, and
+  `finish` with `ticks` (non-negative JSON integers within a long; `5.0`,
+  `"5"` and `1e999` do not count). Server to client: `state` on every
+  connect, `countdown` (`"seconds":3`), `go` with `at` (one server time in
+  epoch milliseconds for everyone), `pos` with the sender's `slot` and
+  `nick`, `results`, `pong` and `error`. A text message over 512 bytes
+  closes the socket with 1008 `message_too_long` as in the spike (the
+  contract wins over the ticket's "ignored"); anything else that is not a
+  valid message gets `{"type":"error","error":"bad_message"}`, `pos` or
+  `finish` outside `racing` gets `not_racing`, a second `finish` gets
+  `already_finished`, and neither closes the socket or the room.
+- The race (`Room`, under `RoomStore`'s lock, every rule on its `Clock`):
+  - `POST /rooms/<id>/start` fixes each member's `slot` (0 to 3, join
+    order) and the room is `starting`.
+  - The countdown starts when every member is connected, or 15 s after
+    `starting`; a member not connected then counts as left. `go` follows
+    3 s after the countdown and the room is `racing`.
+  - `pos` is relayed to every other connected member, never back to the
+    sender. More than 10 from one member in any second (a sliding window)
+    are dropped silently.
+  - The first `finish` received wins; ticks are kept and shown only.
+  - `results` go out when every member has finished or left, 30 s after
+    the first finish, or 4 minutes after `go`. `places` lists the finishers
+    in the order received, then the others in slot order, each with
+    `slot`, `nick`, `kind`, `place` (null without a finish), `ticks` (null
+    without a finish) and `left`. Every socket is then closed with 1000
+    `race_over`, and the room is back in `lobby` with the ready marks
+    cleared and every member counted as seen at the end of the race.
+  - A member connecting again replaces their old socket, which is closed
+    with 1000 `replaced`; the new one gets `state` with the others' last
+    known positions while `racing`. Only the current socket's close counts,
+    so a replaced socket that closes late changes nothing. After the
+    countdown, a member whose socket has been gone for more than 30 s
+    counts as left. A socket with no message for more than 60 s is closed
+    with 1000 `idle`, and its member counts as left 30 s later.
+  - A member who counts as left is out of the room (with the host handover
+    of a leave) and is listed with `"left":true` in the results. So is a
+    member who leaves, joins another room, is deleted, merged or logs out
+    during the race; their socket closes with 1000 `race_over`.
+  - A host's new `POST /rooms` closes their old room in any state; a racing
+    room's sockets close with 1000 `race_over`, without results.
+- `WebSocketHandshakeCheck.upgrade` now takes a `SocketEndpoint`: after the
+  session lookup, which now returns the player (`Sessions.signedInPlayer`),
+  the endpoint can refuse with a status, and once the socket is open it gets
+  a `SocketListener` with `onText` and `onClose`. `onClose` runs once,
+  however the socket ends (the socket's close handler, which also gives the
+  slot back). A listener that throws drops the socket and logs nothing.
+  The 512-byte check moved from the endpoint into the check, so every
+  route has it.
+- Removed (approved by the user on 2026-11-13, REQ-005): the spike endpoint
+  `RaceEchoSocket` (`src/main/java/dev/rassimok/api/klad/RaceEchoSocket.java`,
+  route `/race/echo`), its tests `RaceEchoSocketTest` and its native test
+  `RaceEchoSocketIT`. Every check they made now runs against
+  `/race/<room>` in `SocketGuardsTest` and `SocketGuardsIT` (below).
+  `/race/echo` now reaches the race route as a room named `echo`, which
+  does not exist: 404 after the guards.
+
+### Tests
+
+- Unit, with the fake clock and recording sockets: `RoomStoreRaceTest` (49)
+  covers the refusals (404, 409 for a non-member and for a lobby room), the
+  `state` message whole, a socket that finds the room changed or gone since
+  its handshake was checked (closed with `race_over`), replacement and a
+  replaced socket's late close and message; the countdown when the last
+  member connects and not before, `go` at 3 s and not 1 ms before, with one
+  `at` for everyone; the 15 s wait on both sides with the missing member
+  out of the room and in the results as left; relaying to the others only,
+  `not_racing`, the rate limit (10 in a second, the 11th dropped, the next
+  accepted once the first is a second old), ping and pong, `bad_message`
+  keeping the race; finish order against ticks, `already_finished`; the
+  30 s after the first finish and the 4-minute cap, each on both sides;
+  the end with every member seen and unready, kept 60 s and removed just
+  after; reconnecting within 30 s with the others' positions, leaving after
+  more than 30 s, the idle close at 60 s and just over, and the leave 30 s
+  after it; leave, forget and join elsewhere during a race, the leave of
+  the only member not yet connected (the countdown starts) and of every
+  member (back to an empty lobby); the host's new room closing a racing
+  room. RAS-31's hard condition: 100 started rooms
+  nobody connects to are empty after 15 s and gone 10 minutes later, when
+  `POST /rooms` works again, checked step by step and with one late
+  access. One late `advance` walks countdown, go and the end in order, each
+  at the time it fell due. `RaceMessageTest` (40) covers parsing, and
+  `WebSocketHandshakeCheckTest` the 512-byte boundary.
+- `@QuarkusTest`, real sockets: `RaceSocketTest` (12) runs a whole race of
+  two members (every message compared whole, 1000 `race_over`, the room
+  back in `lobby` with no ready marks) and of three (relayed to both
+  others, three places), a drop and reconnect during the race, replacement,
+  the errors in `starting`, `already_finished`, the host's new room, the
+  refusals (unknown room, not a member, lobby, after the race), and 20
+  replaced sockets followed by the whole cap.
+- `SocketGuardsTest` (37) is the spike's test, moved onto `/race/<room>` and
+  parameterised by socket route (`SocketRoute`; today only `RaceRoute`), so
+  a later route runs them too. Every abuse test still ends by opening the
+  whole cap at once (20 sockets, here in 5 rooms of 4). It adds the route's
+  own refusals (404, 409 twice) to the refused-handshake churn, the
+  security headers and the pipelined case (a refusal then 101 in one
+  write). The not-reading flood now writes empty frames by hand without
+  reading: the race answers each with a 41-byte error, so the 512-byte
+  messages the echo flooded with no longer produced more replies than the
+  network buffers hold.
+- `AbandonedHandshakeLogTest` runs against `/race/<room>`;
+  `ThrowingListenerLogTest` (JVM only, with the test bean
+  `ThrowingSocketRoute`, a route every JVM test application then has)
+  checks that a throwing listener drops the socket without a close frame
+  or any WARN line, that `onClose` runs once, and then opens the whole cap
+  on that route.
+- Native: `RaceSocketIT` and `SocketGuardsIT` run both classes against the
+  binary.
+
+### Decisions worth not relitigating
+
+- **One ticker, not a timer per room.** `RaceSocket` starts one Vert.x
+  periodic timer of 250 ms (`Rules.RACE_TICK`) at startup that calls
+  `RoomStore.advance()`, the same sweep every REST access already runs.
+  No timer belongs to a room, so none can outlive one. Each rule compares
+  the store's `Clock` with the time it falls due, so the unit tests drive
+  every rule with the fake clock and never see the timer. A tick costs a
+  pass over at most 100 rooms. Cloud Run may throttle the CPU between
+  requests, so a tick can come late; while a race socket is open there is
+  a request in flight and the CPU is on. A late sweep applies every rule
+  that fell due since, in order and dated when it fell due, so the 15 s
+  rule and the room cap work with no socket at all (RAS-31's hard
+  condition), through any REST access.
+- **Sends are queued, the lock never waits.** Each socket's `SocketSender`
+  is used on its own event loop only. The room hands every send and close
+  to the socket's own context (`runOnContext`) while it holds the lock, and
+  the write runs there after the lock is released. Queueing is not I/O,
+  and doing it under the lock keeps every socket's messages in the order
+  the room produced them (a countdown never overtakes a state). It is
+  queued even from the socket's own event loop: a direct send can drop the
+  socket, and the close would come back into the room in the middle of its
+  work.
+- **Who is in the race.** The `state` message lists the members still in
+  the race; members who counted as left appear only in `results`. The
+  15 s rule applies until the countdown, the 30 s rule from the countdown
+  on (the contract names it for `racing`; a drop during the 3 s countdown
+  is treated the same). A finished member can still send `pos`, which is
+  relayed, and can also count as left. A race whose other members all left
+  goes on for the one left.
+- **Close reasons.** A member's own leave, a room closed by its host's new
+  room and a socket that finds the race gone at connect all close with
+  1000 `race_over`, the only reason the contract has for "this race is over
+  for you"; the client does not reconnect after 1000.
+- **Socket sizing, on purpose.** `Rules.SOCKETS_OPEN_MAX` stays 20, and with
+  one instance it is the cap for the whole service: 5 full races of 4 at
+  once, against up to 100 rooms. The rest of Cloud Run's 80 request slots
+  stay free for REST, which every lobby needs. A sixth race's players get
+  503 and the game shows a failed socket. At a full cap a reconnect also
+  gets 503 until the old socket's slot comes back. A socket whose client
+  vanished without a close holds its slot until the idle close (60 s
+  without a message).
+- **Grace drop after every close the server starts.** A client that does
+  not answer a close frame, or has stopped reading, used to hold its slot
+  until Vert.x's 10 s closing timeout. Now every close the server starts
+  (replaced, idle, race_over, left, the host's new room, and 1008
+  `message_too_long`) also starts, in the same task on the socket's own
+  event loop, a timer of `Rules.SOCKET_CLOSE_GRACE` (1 s) that drops the
+  connection. A drop on a connection that has ended does nothing, so a
+  client that did answer is unaffected. A replaced socket therefore frees
+  its slot within about 1 s whatever its client does, which also bounds
+  how many slots one cookie can hold by reconnecting. Tests open the whole
+  cap with raw clients that read nothing and ignore the close, after a
+  1008 and after a replace, and need it back in under 3 s (they take 10 s
+  without the drop).
+- **A throwing `endpoint.open` drops the socket** instead of leaving a
+  paused socket with no handlers; the handlers are installed only once the
+  listener exists, and the connection's close gives the slot back.
+- **The parser skips text that does not start with a brace**, which cannot
+  be a JSON object, so a flood of empty or junk frames costs no exception
+  each.
+- **Round-6 review items, deferred as follow-ups** (RAS-29 r6): bounding
+  the session lookups in flight (holding the slot until the lookup returns
+  would change when a slot comes back, so it needs a ticket of its own);
+  the "Result is already complete" ERROR when a client leaves right after
+  `toWebSocket()`, not tried; and a per-player socket cap, mostly answered
+  by one socket per member (a second connect replaces the first) and now
+  by the 1 s grace drop.
+- **`application.properties` is unchanged.** Its WebSocket comment still
+  says the endpoint refuses a message over 512 bytes; the check does that
+  now, for every route. The file is CODEOWNERS-protected and this ticket
+  does not name it, so the comment waits for a change there.
+- **Measured on the native binary** of this branch, set up as for the
+  spike: `--memory 256m --memory-swap 256m --cpus 1`, a throwaway
+  `postgres:18`, a raw-socket client in a second container that sets up
+  the rooms over REST, each row on a fresh server container. `memory.peak`,
+  and `anon` sampled every second, come from the container's cgroup; sizes
+  in MiB. Idle: 94.4 peak, 20.5 `anon`.
+
+  | Row | Peak | `anon` max | What happened |
+  |---|---|---|---|
+  | one race of 4 clients | 109.3 | 31.5 | one `go` time for all 4; 180 of 180 positions relayed, none echoed; results in receipt order; 4 times 1000 `race_over`; the room back in `lobby`, nobody ready |
+  | 20 reading sockets, 3 MiB of empty frames each (the spike's worst row), run 1 | 202.8 | 103.9 | each of the 10,485,760 frames answered with `bad_message`, no socket dropped, 165 s of CPU |
+  | the same, run 2 | 200.3 | 100.9 | 19 sockets answered in full, 1 dropped as not reading, 157 s of CPU |
+  | 20 reading sockets, 3 MiB of `{}` frames each, run 1 | 228.7 | 119.9 | each of the 7,864,320 frames parsed and answered with `bad_message`, no socket dropped, 129 s of CPU |
+  | the same, run 2 | 214.4 | 107.3 | the same, 128 s of CPU |
+
+  - Empty frames skip the JSON parser (above), so the `{}` rows are the
+    worst case: each frame is parsed into an empty object before its
+    error. They peak where the spike's echo did in its worst row (226 and
+    220 MiB, `anon` 124 and 102), about 27 MiB under the limit at worst;
+    the empty-frame rows peak lower although each reply is now 43 bytes
+    instead of 2 (not traced to a cause).
+  - `/status` answered in 2 ms 10 s into each flood. Nothing was logged at
+    WARN or above, apart from the known line about
+    `quarkus.log.console.json`.
+  - A flood keeps the one CPU busy for as long as it lasts (here about 2.5
+    minutes).
+
 ## 2026-11-13 (eighth) - Presence and rooms in memory, one instance
 
 Players can see who is online and gather in a room of up to four before a

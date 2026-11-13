@@ -54,9 +54,12 @@ final class Rules {
     // A WebSocket text message, counted in UTF-8 bytes.
     static final int SOCKET_MESSAGE_BYTES_MAX = 512;
     // Each open socket holds one of the instance's request slots on Cloud
-    // Run; this keeps most of them free for REST.
+    // Run; this keeps most of them free for REST. With one instance it is
+    // the cap for the whole service: 5 full races at once.
     static final int SOCKETS_OPEN_MAX = 20;
     static final int SOCKET_UNFINISHED_SENDS_MAX = 8;
+    // How long a socket may take to end after the server's close frame.
+    static final Duration SOCKET_CLOSE_GRACE = Duration.ofSeconds(1);
 
     // Presence and rooms live in the memory of the one instance; the caps
     // bound how much of its 256 MB they can take.
@@ -68,6 +71,19 @@ final class Rules {
     static final int ROOM_ID_LENGTH = 10;
     static final Duration LOBBY_MEMBER_SILENCE = Duration.ofSeconds(60);
     static final Duration EMPTY_ROOM_LIFETIME = Duration.ofMinutes(10);
+
+    // The race socket, contract section 8.
+    static final Duration RACE_CONNECT_WAIT = Duration.ofSeconds(15);
+    static final int RACE_COUNTDOWN_SECONDS = 3;
+    static final Duration RACE_COUNTDOWN = Duration.ofSeconds(RACE_COUNTDOWN_SECONDS);
+    static final Duration RACE_AFTER_FIRST_FINISH = Duration.ofSeconds(30);
+    // Inside Cloud Run's default request timeout of 5 minutes, which a
+    // socket counts as one request.
+    static final Duration RACE_CAP = Duration.ofMinutes(4);
+    static final Duration RACE_RECONNECT_WAIT = Duration.ofSeconds(30);
+    static final Duration RACE_SOCKET_IDLE = Duration.ofSeconds(60);
+    static final int RACE_POSITIONS_PER_SECOND = 10;
+    static final Duration RACE_TICK = Duration.ofMillis(250);
 
     private Rules() {
     }
