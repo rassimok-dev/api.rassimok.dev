@@ -12,6 +12,7 @@ import io.vertx.core.net.impl.ConnectionBase;
  */
 final class SocketSender {
 
+    static final short NORMAL_CLOSURE = 1000;
     static final short POLICY_VIOLATION = 1008;
     static final String NOT_READING = "not_reading";
 
@@ -27,7 +28,7 @@ final class SocketSender {
 
     void send(String text) {
         if (Rules.SOCKET_UNFINISHED_SENDS_MAX <= unfinishedSends) {
-            close(NOT_READING);
+            close(POLICY_VIOLATION, NOT_READING);
             drop();
         } else if (!socket.isClosed()) {
             unfinishedSends++;
@@ -35,8 +36,8 @@ final class SocketSender {
         }
     }
 
-    void close(String reason) {
-        socket.close(POLICY_VIOLATION, reason);
+    void close(short code, String reason) {
+        socket.close(code, reason);
     }
 
     // Ends the socket at once, without a close frame. HttpConnection.close()

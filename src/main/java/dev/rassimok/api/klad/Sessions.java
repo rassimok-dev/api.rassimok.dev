@@ -46,11 +46,19 @@ public class Sessions {
         return token;
     }
 
-    // Transactional so the WebSocket handshake check can call it from a
-    // worker thread, where no request context is active.
     @Transactional
     boolean isSignedIn(String token) {
         return null != findValid(token, Instant.now());
+    }
+
+    // Transactional so the WebSocket handshake check can call it from a
+    // worker thread, where no request context is active. Null without a
+    // valid session.
+    @Transactional
+    LobbyPlayer signedInPlayer(String token) {
+        PlayerSession session = findValid(token, Instant.now());
+        Player player = null == session ? null : Player.findById(session.playerId);
+        return null == player ? null : LobbyPlayer.of(player);
     }
 
     SignedIn require(String token) {

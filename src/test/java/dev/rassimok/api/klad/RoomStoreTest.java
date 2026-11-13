@@ -786,8 +786,13 @@ class RoomStoreTest {
     @Test
     void shouldKeepSilentMembers_whenFind_givenRoomStarting() {
         // given
-        String id = startedRoom();
-        clock.advance(Duration.ofMinutes(30));
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.setReady(id, bob, true);
+        clock.advance(Rules.LOBBY_MEMBER_SILENCE.minusSeconds(1));
+        rooms.setReady(id, alice, true);
+        rooms.start(id, alice);
+        clock.advance(Rules.RACE_CONNECT_WAIT.minusSeconds(1));
 
         // when
         RoomView room = rooms.find(id, carol);

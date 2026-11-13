@@ -12,7 +12,10 @@ class WebSocketHandshakeCheckTest {
 
     private static final String ALLOWED_ORIGIN = "https://game.example";
 
-    private final WebSocketHandshakeCheck check = new WebSocketHandshakeCheck(ALLOWED_ORIGIN, token -> true,
+    // 256 Cyrillic letters of two bytes each: exactly the 512-byte limit.
+    private static final String LARGEST_MESSAGE = "\u0416".repeat(256);
+
+    private final WebSocketHandshakeCheck check = new WebSocketHandshakeCheck(ALLOWED_ORIGIN, token -> null,
             new OpenSockets());
 
     @Test
@@ -35,5 +38,23 @@ class WebSocketHandshakeCheckTest {
 
         // then
         assertThat(isAllowed, equalTo(false));
+    }
+
+    @Test
+    void shouldNotBeTooLong_whenIsTooLong_givenMessageOfExactly512Bytes() {
+        // when
+        boolean isTooLong = WebSocketHandshakeCheck.isTooLong(LARGEST_MESSAGE);
+
+        // then
+        assertThat(isTooLong, equalTo(false));
+    }
+
+    @Test
+    void shouldBeTooLong_whenIsTooLong_givenMessageOf513Bytes() {
+        // when
+        boolean isTooLong = WebSocketHandshakeCheck.isTooLong(LARGEST_MESSAGE + "x");
+
+        // then
+        assertThat(isTooLong, equalTo(true));
     }
 }

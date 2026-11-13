@@ -7,14 +7,16 @@ import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 /**
  * The rooms of the one instance, in memory, lost on a restart. One lock
  * covers them all, because a join can leave another room and the cap counts
- * every room. Old members and rooms go on every access; nothing runs in
- * between.
+ * every room. Old members and rooms go, and races move on, on every access
+ * and on RaceSocket's tick. The lock never waits: a room only queues its
+ * socket sends, which run on each socket's own event loop.
  */
 @Singleton
 public class RoomStore {
@@ -36,11 +38,15 @@ public class RoomStore {
     }
 
     // Closing the player's old room first frees its place under the cap, so
-    // a host can always replace their room.
+    // a host can always replace their room, also one that is racing.
     synchronized String create(LobbyPlayer player) {
         Instant now = clock.instant();
         removeExpired(now);
-        rooms.values().removeIf(room -> room.isHostOrLastHost(player.id()));
+        List<Room> hostedRooms = rooms.values().stream().filter(room -> room.isHostOrLastHost(player.id())).toList();
+        hostedRooms.forEach(room -> {
+            room.close();
+            rooms.remove(room.id);
+        });
         if (Rules.ROOMS_MAX <= rooms.size()) {
             throw new ApiException(Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
         }
@@ -79,7 +85,7 @@ public class RoomStore {
         Room room = existingRoom(roomId, now);
         Room.Member member = room.member(player.id());
         if (null != member) {
-            room.remove(member, now);
+            room.leave(member, now);
         }
     }
 
@@ -122,7 +128,7 @@ public class RoomStore {
         if (!room.canStart()) {
             throw new ApiException(Response.Status.CONFLICT, ApiException.NOT_READY);
         }
-        room.state = Room.State.STARTING;
+        room.start(now);
         room.markSeen(player, now);
         return room.view(player.id());
     }
@@ -137,6 +143,52 @@ public class RoomStore {
         }
     }
 
+    // Checked before the upgrade; connect checks again, as the room may
+    // change in between.
+    synchronized int raceRefusal(String roomId, UUID playerId) {
+        removeExpired(clock.instant());
+        Room room = rooms.get(roomId);
+        int status;
+        if (null == room) {
+            status = WebSocketHandshakeCheck.UNKNOWN_ROOM;
+        } else if (!room.canRace(playerId)) {
+            status = WebSocketHandshakeCheck.NOT_IN_RACE;
+        } else {
+            status = SocketEndpoint.NO_REFUSAL;
+        }
+        return status;
+    }
+
+    synchronized void connect(String roomId, UUID playerId, PlayerSocket socket) {
+        Instant now = clock.instant();
+        removeExpired(now);
+        Room room = rooms.get(roomId);
+        if (null == room) {
+            socket.close(Room.RACE_OVER);
+        } else {
+            room.connect(playerId, socket, now);
+        }
+    }
+
+    // Messages and closes touch their own room only; the tick sweeps the rest.
+    synchronized void receive(String roomId, UUID playerId, PlayerSocket socket, RaceMessage message) {
+        Room room = rooms.get(roomId);
+        if (null != room) {
+            room.receive(playerId, socket, message, clock.instant());
+        }
+    }
+
+    synchronized void disconnect(String roomId, UUID playerId, PlayerSocket socket) {
+        Room room = rooms.get(roomId);
+        if (null != room) {
+            room.disconnect(playerId, socket, clock.instant());
+        }
+    }
+
+    synchronized void advance() {
+        removeExpired(clock.instant());
+    }
+
     private Room existingRoom(String roomId, Instant now) {
         removeExpired(now);
         Room room = rooms.get(roomId);
@@ -147,7 +199,10 @@ public class RoomStore {
     }
 
     private void removeExpired(Instant now) {
-        rooms.values().forEach(room -> room.removeSilentMembers(now));
+        rooms.values().forEach(room -> {
+            room.advance(now);
+            room.removeSilentMembers(now);
+        });
         rooms.values().removeIf(room -> room.isExpired(now));
     }
 
@@ -158,7 +213,7 @@ public class RoomStore {
     private void leaveCurrentRoom(UUID playerId, Instant now) {
         Room room = currentRoom(playerId);
         if (null != room) {
-            room.remove(room.member(playerId), now);
+            room.leave(room.member(playerId), now);
         }
     }
 

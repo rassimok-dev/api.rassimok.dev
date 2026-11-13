@@ -24,18 +24,18 @@ class AbandonedHandshakeLogTest {
     private static final int ABANDONED_HANDSHAKES = 2 * Rules.SOCKETS_OPEN_MAX;
     private static final long PAUSE_MILLIS = 10;
 
-    @TestHTTPResource("/race/echo")
-    URI echoUri;
+    @TestHTTPResource("/")
+    URI serverUri;
 
     @Test
     void shouldLogNoWarning_whenConnect_givenHandshakesAbandonedDuringLookup() throws Exception {
         // given
-        String token = TestPlayers.createGuest("Racer", Rules.KIND_HUMAN);
+        SocketRoute.Seat seat = RaceRoute.SHARED.newSeat();
 
         // when
         List<String> warnings = warningsWhile(() -> {
             for (int i = 0; i < ABANDONED_HANDSHAKES; i++) {
-                RaceEchoSocketTest.sendUpgradeRequest(echoUri, token).close();
+                SocketGuardsTest.sendUpgradeRequest(serverUri, seat).close();
                 Thread.sleep(PAUSE_MILLIS);
             }
         });
@@ -49,13 +49,13 @@ class AbandonedHandshakeLogTest {
     @Test
     void shouldLogNoWarning_whenConnect_givenTwoHandshakesInOneWrite() throws Exception {
         // given
-        String token = TestPlayers.createGuest("Racer", Rules.KIND_HUMAN);
+        RaceRoute route = RaceRoute.SHARED;
 
         // when
         List<String> warnings = warningsWhile(() -> {
             for (int i = 0; i < ABANDONED_HANDSHAKES; i++) {
-                try (Socket socket = RaceEchoSocketTest.sendTwoUpgradeRequests(echoUri, token)) {
-                    RaceEchoSocketTest.readHead(socket);
+                try (Socket socket = SocketGuardsTest.sendTwoUpgradeRequests(serverUri, route.newSeat())) {
+                    SocketGuardsTest.readHead(socket);
                 }
             }
         });
@@ -64,7 +64,7 @@ class AbandonedHandshakeLogTest {
         assertThat(warnings, empty());
     }
 
-    private static List<String> warningsWhile(Handshakes handshakes) throws Exception {
+    static List<String> warningsWhile(Handshakes handshakes) throws Exception {
         List<String> warnings = new CopyOnWriteArrayList<>();
         Handler collector = new Handler() {
             @Override

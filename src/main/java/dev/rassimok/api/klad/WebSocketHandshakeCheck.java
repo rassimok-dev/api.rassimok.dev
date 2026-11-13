@@ -15,10 +15,10 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.BiConsumer;
-import java.util.function.Predicate;
+import java.util.function.Function;
 
 /**
  * Every WebSocket handshake needs the site's exact Origin and a valid session
@@ -33,15 +33,18 @@ public class WebSocketHandshakeCheck {
     static final int BODY_SENT = 400;
     static final int NO_SESSION = 401;
     static final int FOREIGN_ORIGIN = 403;
+    static final int UNKNOWN_ROOM = 404;
+    static final int NOT_IN_RACE = 409;
     static final int OTHER_VERSION = 426;
     static final int TOO_MANY_SOCKETS = 503;
     // Never sent, the client has gone; nginx uses 499 for this.
     static final int CLIENT_GONE = 499;
     private static final String VERSION_HEADER = "Sec-WebSocket-Version";
     private static final String VERSION = "13";
+    static final String TOO_LONG = "message_too_long";
 
     private final String allowedOrigin;
-    private final Predicate<String> isValidSession;
+    private final Function<String, LobbyPlayer> signedInPlayer;
     private final OpenSockets openSockets;
     // True while the connection holds a slot. The entry stays until the
     // connection closes, so a kept-alive connection gets one close listener,
@@ -51,19 +54,20 @@ public class WebSocketHandshakeCheck {
     @Inject
     WebSocketHandshakeCheck(@ConfigProperty(name = "klad.websocket.allowed-origin") String allowedOrigin,
                             Sessions sessions, OpenSockets openSockets) {
-        this(allowedOrigin, sessions::isSignedIn, openSockets);
+        this(allowedOrigin, sessions::signedInPlayer, openSockets);
     }
 
-    WebSocketHandshakeCheck(String allowedOrigin, Predicate<String> isValidSession, OpenSockets openSockets) {
+    WebSocketHandshakeCheck(String allowedOrigin, Function<String, LobbyPlayer> signedInPlayer,
+                            OpenSockets openSockets) {
         this.allowedOrigin = allowedOrigin;
-        this.isValidSession = isValidSession;
+        this.signedInPlayer = signedInPlayer;
         this.openSockets = openSockets;
     }
 
     // The endpoint gets each text message and the socket's sender, but not
     // the socket, so it cannot replace the handlers that keep the count and
     // the read limits.
-    void upgrade(RoutingContext context, BiConsumer<SocketSender, String> onText) {
+    void upgrade(RoutingContext context, SocketEndpoint endpoint) {
         HttpServerRequest request = context.request();
         HttpConnection connection = request.connection();
         MultiMap headers = request.headers();
@@ -92,13 +96,17 @@ public class WebSocketHandshakeCheck {
             String token = null == cookie ? null : cookie.getValue();
             // The session lookup blocks, so it runs on a worker thread. Its result
             // comes back on the request's event loop, where the upgrade happens.
-            Vertx.currentContext().executeBlocking(() -> isValidSession.test(token), false)
-                    .onComplete(lookup -> afterLookup(context, connection, lookup, onText));
+            Vertx.currentContext().executeBlocking(() -> signedInPlayer.apply(token), false)
+                    .onComplete(lookup -> afterLookup(context, connection, lookup, endpoint));
         }
     }
 
     boolean isAllowedOrigin(String origin) {
         return allowedOrigin.equals(origin);
+    }
+
+    static boolean isTooLong(String message) {
+        return Rules.SOCKET_MESSAGE_BYTES_MAX < message.getBytes(StandardCharsets.UTF_8).length;
     }
 
     // A handshake has no body. Vert.x would read one into memory before the
@@ -140,36 +148,64 @@ public class WebSocketHandshakeCheck {
     // The upgrade of a gone client would throw and log an error, so it is
     // refused first. The handshake runs one event-loop task after
     // toWebSocket(); a close in between fails the upgrade.
-    private void afterLookup(RoutingContext context, HttpConnection connection, AsyncResult<Boolean> lookup,
-                             BiConsumer<SocketSender, String> onText) {
+    private void afterLookup(RoutingContext context, HttpConnection connection, AsyncResult<LobbyPlayer> lookup,
+                             SocketEndpoint endpoint) {
         if (context.response().closed()) {
             giveBackSlot(connection);
             refuse(context, CLIENT_GONE);
         } else if (lookup.failed()) {
             giveBackSlot(connection);
             context.fail(lookup.cause());
-        } else if (!lookup.result()) {
+        } else if (null == lookup.result()) {
             giveBackSlot(connection);
             refuse(context, NO_SESSION);
         } else {
-            context.request().toWebSocket().onComplete(upgraded -> {
-                if (upgraded.succeeded()) {
-                    open(upgraded.result(), connection, onText);
-                } else {
-                    giveBackSlot(connection);
-                }
-            });
+            LobbyPlayer player = lookup.result();
+            int refusalStatus = endpoint.refusalStatus(player);
+            if (SocketEndpoint.NO_REFUSAL != refusalStatus) {
+                giveBackSlot(connection);
+                refuse(context, refusalStatus);
+            } else {
+                context.request().toWebSocket().onComplete(upgraded -> {
+                    if (upgraded.succeeded()) {
+                        open(upgraded.result(), connection, player, endpoint);
+                    } else {
+                        giveBackSlot(connection);
+                    }
+                });
+            }
         }
     }
 
-    private void open(ServerWebSocket socket, HttpConnection connection, BiConsumer<SocketSender, String> onText) {
+    private void open(ServerWebSocket socket, HttpConnection connection, LobbyPlayer player,
+                      SocketEndpoint endpoint) {
         SocketSender sender = new SocketSender(socket, connection);
         socket.pause();
-        socket.closeHandler(ignored -> giveBackSlot(connection));
+        SocketListener listener = endpoint.open(player, sender);
+        socket.closeHandler(ignored -> {
+            giveBackSlot(connection);
+            listener.onClose();
+        });
         socket.exceptionHandler(ignored -> sender.drop());
         socket.frameHandler(frame -> afterFrame(socket, sender, frame));
-        socket.textMessageHandler(message -> onText.accept(sender, message));
+        socket.textMessageHandler(message -> onText(listener, sender, message));
         socket.fetch(1);
+    }
+
+    // The size is checked here and not only by the frame size limit: over
+    // that limit the connection is dropped without a close code. A listener
+    // that throws is dropped too, because Vert.x would log an error for each
+    // of its messages.
+    private static void onText(SocketListener listener, SocketSender sender, String message) {
+        if (isTooLong(message)) {
+            sender.close(SocketSender.POLICY_VIOLATION, TOO_LONG);
+        } else {
+            try {
+                listener.onText(message);
+            } catch (RuntimeException e) {
+                sender.drop();
+            }
+        }
     }
 
     // Vert.x calls this after the endpoint's message handler, and fetches by
