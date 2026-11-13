@@ -12,6 +12,7 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.Semaphore;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -30,13 +31,18 @@ public class LoginCodes {
     // starts and not when the native image is built.
     private final SecureRandom random = new SecureRandom();
 
+    // Requests beyond these answer 429 at once instead of waiting for the
+    // table lock, each with a pooled connection, so a flood cannot fill the pool.
+    private final Semaphore requestSlots = new Semaphore(Rules.CODE_REQUESTS_PER_INSTANCE);
+
     // The table lock makes code requests from every instance count one after
     // another, so a burst cannot slip past the limits. Old rows go on every
     // request; dontRollbackOn keeps that when the answer is 429.
     @Transactional(dontRollbackOn = ApiException.class)
     String issue(String email, Instant now) {
         EntityManager entityManager = LoginMail.getEntityManager();
-        // Each waiter holds a pooled connection, so in a flood they give up early.
+        // Bounds each wait, and so how long a flood keeps going once it stops.
+        // How many connections wait is bounded by the request slots.
         entityManager.createNativeQuery("set local lock_timeout = '2s'").executeUpdate();
         entityManager.createNativeQuery("lock table login_mail in exclusive mode").executeUpdate();
         Instant dayAgo = now.minus(Rules.MAILS_PER_DAY_WINDOW);
@@ -63,6 +69,14 @@ public class LoginCodes {
         sent.sentAt = now;
         sent.persist();
         return code;
+    }
+
+    boolean tryTakeRequestSlot() {
+        return requestSlots.tryAcquire();
+    }
+
+    void releaseRequestSlot() {
+        requestSlots.release();
     }
 
     // Runs in the caller's transaction, which must not roll back when this

@@ -11,11 +11,16 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.sql.DataSource;
+import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -30,6 +35,10 @@ class PlayersResourceTest {
             + "Secure; SameSite=Strict; Max-Age=7776000";
     private static final String CLEARED_COOKIE = "klad_session=; Path=/klad/api; HttpOnly; Secure; "
             + "SameSite=Strict; Max-Age=0";
+    private static final String NICK_TAKEN_BODY = "{\"error\":\"nick_taken\"}";
+    private static final String PLAYER_ROW = """
+            select id, nick, nick_key, kind, email, created_at, last_seen_at from player where id = ?
+            """;
 
     @Inject
     DataSource dataSource;
@@ -151,6 +160,46 @@ class PlayersResourceTest {
         response.statusCode(201).header("Set-Cookie", matchesPattern(COOKIE_PATTERN));
     }
 
+    // Fullwidth letters, which NFKC turns into plain Latin, count as the same key.
+    @Test
+    void shouldRefuseNickTaken_whenCreatePlayer_givenAccountHoldsNickKeyInAnyCase() throws SQLException {
+        // given
+        createAccount("Kept_Nick", TestPlayers.uniqueEmail("kept-nick"));
+        List<String> variants = List.of("Kept_Nick", "KEPT_NICK", "kept_nick", " kEpT_nIcK ",
+                "\uFF2B\uFF45\uFF50\uFF54_\uFF2E\uFF49\uFF43\uFF4B");
+
+        // when
+        List<String> answers = variants.stream()
+                .map(nick -> given().contentType(ContentType.JSON).body(Map.of("nick", nick, "kind", Rules.KIND_AGENT))
+                        .when().post("/players").then().extract())
+                .map(response -> response.statusCode() + " " + response.body().asString() + " "
+                        + response.header("Set-Cookie"))
+                .toList();
+
+        // then
+        assertThat(answers, equalTo(Collections.nCopies(variants.size(), "409 " + NICK_TAKEN_BODY + " null")));
+        assertThat(TestSql.count(dataSource, "select count(*) from player where nick_key = 'kept_nick'"),
+                equalTo(1L));
+    }
+
+    @Test
+    void shouldCreateGuest_whenCreatePlayer_givenNickOfAnotherGuest() throws SQLException {
+        // given
+        TestPlayers.createGuest("TwinGuest", Rules.KIND_HUMAN);
+
+        // when
+        ValidatableResponse response = given()
+                .contentType(ContentType.JSON)
+                .body(Map.of("nick", "TWINGUEST", "kind", Rules.KIND_HUMAN))
+                .when().post("/players")
+                .then();
+
+        // then
+        response.statusCode(201).body("nick", equalTo("TWINGUEST"));
+        assertThat(TestSql.count(dataSource, "select count(*) from player where nick_key = 'twinguest'"),
+                equalTo(2L));
+    }
+
     @Test
     void shouldReturnPlayerWithoutCookie_whenMe_givenSessionYoungerThanADay() {
         // given
@@ -255,6 +304,97 @@ class PlayersResourceTest {
         assertThat(response.statusCode(), equalTo(200));
         assertThat(response.as(PlayerView.class), equalTo(new PlayerView("NewName", Rules.KIND_AGENT, false, null)));
         assertThat(TestSql.row(dataSource, playerAndSession, Sessions.hash(token)), equalTo(expected));
+    }
+
+    @Test
+    void shouldRefuseNickTakenAndKeepGuest_whenRename_givenGuestAndAccountHoldsNickKey() throws SQLException {
+        // given
+        createAccount("Claimed", TestPlayers.uniqueEmail("claimed"));
+        String token = TestPlayers.createGuest("Claimer", Rules.KIND_HUMAN);
+        List<Object> expected = TestSql.row(dataSource, PLAYER_ROW, playerId(token));
+
+        // when
+        ValidatableResponse response = rename(token, "CLAIMED");
+
+        // then
+        response.statusCode(409).body(equalTo(NICK_TAKEN_BODY));
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, playerId(token)), equalTo(expected));
+    }
+
+    @Test
+    void shouldRefuseNickTakenAndKeepAccount_whenRename_givenOtherAccountHoldsNickKey() throws SQLException {
+        // given
+        createAccount("FirstOwner", TestPlayers.uniqueEmail("first-owner"));
+        String token = createAccount("SecondOwner", TestPlayers.uniqueEmail("second-owner"));
+        List<Object> expected = TestSql.row(dataSource, PLAYER_ROW, playerId(token));
+
+        // when
+        ValidatableResponse response = rename(token, "firstowner");
+
+        // then
+        response.statusCode(409).body(equalTo(NICK_TAKEN_BODY));
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, playerId(token)), equalTo(expected));
+    }
+
+    @Test
+    void shouldRename_whenRename_givenAccountChangesOnlyCaseOfOwnNick() throws SQLException {
+        // given
+        String email = TestPlayers.uniqueEmail("case-keeper");
+        String token = createAccount("CaseKeeper", email);
+        List<Object> expected = TestSql.row(dataSource, PLAYER_ROW, playerId(token));
+        expected.set(1, "CASEKEEPER");
+
+        // when
+        ExtractableResponse<Response> response = rename(token, "CASEKEEPER").extract();
+
+        // then
+        assertThat(response.statusCode(), equalTo(200));
+        assertThat(response.as(PlayerView.class), equalTo(new PlayerView("CASEKEEPER", Rules.KIND_HUMAN, true, email)));
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, playerId(token)), equalTo(expected));
+    }
+
+    @Test
+    void shouldRename_whenRename_givenAccountTakesNickOnlyGuestsUse() throws SQLException {
+        // given
+        String guest = TestPlayers.createGuest("GuestsOnly", Rules.KIND_HUMAN);
+        List<Object> expectedGuest = TestSql.row(dataSource, PLAYER_ROW, playerId(guest));
+        String token = createAccount("GuestsFollower", TestPlayers.uniqueEmail("guests-follower"));
+
+        // when
+        ValidatableResponse response = rename(token, "guestsonly");
+
+        // then
+        response.statusCode(200).body("nick", equalTo("guestsonly")).body("account", equalTo(true));
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, playerId(guest)), equalTo(expectedGuest));
+    }
+
+    // The other connection plays an instance that gives an account the key
+    // after this rename has checked it; the unique index refuses the rename.
+    @Test
+    void shouldRefuseNickTaken_whenRename_givenOtherAccountTakesNickKeyMeanwhile() throws Exception {
+        // given
+        String token = createAccount("RenameRacer", TestPlayers.uniqueEmail("rename-racer"));
+        List<Object> expected = TestSql.row(dataSource, PLAYER_ROW, playerId(token));
+
+        // when
+        long lockWaiters;
+        ExtractableResponse<Response> response;
+        try (ExecutorService executor = Executors.newSingleThreadExecutor();
+             Connection otherInstance = dataSource.getConnection()) {
+            otherInstance.setAutoCommit(false);
+            TestPlayers.insertAccount(otherInstance, "RaceWinner", TestPlayers.uniqueEmail("race-winner"));
+            Future<ExtractableResponse<Response>> request = executor.submit(
+                    () -> rename(token, "RACEWINNER").extract());
+            lockWaiters = TestSql.awaitLockWaiters(dataSource, 1);
+            otherInstance.commit();
+            response = request.get();
+        }
+
+        // then
+        assertThat(lockWaiters, equalTo(1L));
+        assertThat(response.statusCode(), equalTo(409));
+        assertThat(response.body().asString(), equalTo(NICK_TAKEN_BODY));
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, playerId(token)), equalTo(expected));
     }
 
     @ParameterizedTest
@@ -403,5 +543,22 @@ class PlayersResourceTest {
 
         // then
         response.statusCode(401).body("error", equalTo(ApiException.NO_SESSION));
+    }
+
+    // Made in the table: these tests are about nicks, not the login.
+    private String createAccount(String nick, String email) throws SQLException {
+        String token = TestPlayers.createGuest(nick, Rules.KIND_HUMAN);
+        TestSql.execute(dataSource, "update player set email = ? where id = ?", email, playerId(token));
+        return token;
+    }
+
+    private UUID playerId(String token) throws SQLException {
+        return (UUID) TestSql.row(dataSource, "select player_id from session where token_hash = ?",
+                Sessions.hash(token)).getFirst();
+    }
+
+    private static ValidatableResponse rename(String token, String nick) {
+        return given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON).body(Map.of("nick", nick))
+                .when().patch("/players/me").then();
     }
 }

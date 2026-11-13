@@ -25,7 +25,8 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 
-// JVM only: a native test cannot see the binary's log from here.
+// JVM only: the log handler and the injected data source need the
+// application in this JVM.
 @QuarkusTest
 @WithTestResource(RefusingSmtpServer.class)
 class LoginMailFailureTest {
@@ -44,6 +45,23 @@ class LoginMailFailureTest {
         // given
         String email = TestPlayers.uniqueEmail("refused-recipient");
         List<LogRecord> records = new CopyOnWriteArrayList<>();
+
+        // when
+        ValidatableResponse response = requestCodeCollectingLogs(email, records);
+
+        // then
+        response.statusCode(500).body("error", equalTo("internal_server_error"));
+        assertThat(loginMessages(records), equalTo(List.of("Login code mail not sent: " + SMTPException.class.getName()
+                + ", reply " + RefusingSmtpServer.REFUSED_REPLY_CODE)));
+        assertThat(records.stream().filter(record -> null != record.getThrown()).toList(), empty());
+        assertThat(records.stream().filter(record -> textOf(record).contains(email)).toList(), empty());
+        assertThat(TestSql.count(dataSource, "select count(*) from login_mail where email_hash = ?",
+                Sessions.hash(email)), equalTo(1L));
+        assertThat(TestSql.count(dataSource, "select count(*) from login_code where email_hash = ?",
+                Sessions.hash(email)), equalTo(1L));
+    }
+
+    static ValidatableResponse requestCodeCollectingLogs(String email, List<LogRecord> records) {
         Handler collector = new Handler() {
             @Override
             public void publish(LogRecord record) {
@@ -60,31 +78,22 @@ class LoginMailFailureTest {
         };
         Logger root = Logger.getLogger("");
         root.addHandler(collector);
-
-        // when
-        ValidatableResponse response;
         try {
-            response = given().contentType(ContentType.JSON).body(Map.of("email", email))
+            return given().contentType(ContentType.JSON).body(Map.of("email", email))
                     .when().post("/login/code").then();
         } finally {
             root.removeHandler(collector);
         }
+    }
 
-        // then
-        response.statusCode(500).body("error", equalTo("internal_server_error"));
-        List<String> loginMessages = records.stream()
+    static List<String> loginMessages(List<LogRecord> records) {
+        return records.stream()
                 .filter(record -> LoginResource.class.getName().equals(record.getLoggerName()))
                 .map(LogRecord::getMessage)
                 .toList();
-        assertThat(loginMessages, equalTo(List.of("Login code mail not sent: " + SMTPException.class.getName()
-                + ", reply " + RefusingSmtpServer.REFUSED_REPLY_CODE)));
-        assertThat(records.stream().filter(record -> null != record.getThrown()).toList(), empty());
-        assertThat(records.stream().filter(record -> textOf(record).contains(email)).toList(), empty());
-        assertThat(TestSql.count(dataSource, "select count(*) from login_mail where email_hash = ?",
-                Sessions.hash(email)), equalTo(1L));
     }
 
-    private static String textOf(LogRecord record) {
+    static String textOf(LogRecord record) {
         StringBuilder text = new StringBuilder(String.valueOf(record.getMessage()));
         text.append(Arrays.toString(record.getParameters()));
         for (Throwable cause = record.getThrown(); null != cause; cause = cause.getCause()) {

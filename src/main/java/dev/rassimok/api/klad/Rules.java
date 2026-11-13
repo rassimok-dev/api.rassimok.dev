@@ -48,6 +48,9 @@ final class Rules {
     // mails sent by hand.
     static final int MAILS_PER_DAY = 80;
     static final Duration MAILS_PER_DAY_WINDOW = Duration.ofDays(1);
+    // Code requests count one after another in the database anyway, so two
+    // at a time per instance lose nothing.
+    static final int CODE_REQUESTS_PER_INSTANCE = 2;
 
     private Rules() {
     }

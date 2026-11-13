@@ -19,7 +19,6 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -36,6 +35,7 @@ import java.util.stream.Collectors;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
@@ -49,9 +49,11 @@ class LoginResourceTest {
             + "Secure; SameSite=Strict; Max-Age=7776000";
     private static final String CLEARED_COOKIE = "klad_session=; Path=/klad/api; HttpOnly; Secure; "
             + "SameSite=Strict; Max-Age=0";
-    private static final int LOCK_POLLS = 100;
     private static final String LOGIN_CODE_ROW = """
             select email_hash, code_hash, attempts, expires_at, created_at from login_code where email_hash = ?
+            """;
+    private static final String PLAYER_ROW = """
+            select id, nick, nick_key, kind, email, created_at, last_seen_at from player where id = ?
             """;
 
     @Inject
@@ -309,18 +311,22 @@ class LoginResourceTest {
         assertThat(TestSql.count(dataSource, "select count(*) from login_mail"), equalTo(1L));
     }
 
+    // Two codes first, so the one left to send does not depend on how many of
+    // the burst get one of the instance's request slots.
     @Test
     void shouldSendOnlyThree_whenRequestCode_givenTenParallelRequestsForOneEmail()
             throws InterruptedException, SQLException {
         // given
         String email = TestPlayers.uniqueEmail("burst");
+        postCode(email).statusCode(202);
+        postCode(email).statusCode(202);
         List<Callable<Integer>> requests = Collections.nCopies(10, () -> postCode(email).extract().statusCode());
 
         // when
         Map<Integer, Long> statusCounts = inParallel(requests);
 
         // then
-        assertThat(statusCounts, equalTo(Map.of(202, 3L, 429, 7L)));
+        assertThat(statusCounts, equalTo(Map.of(202, 1L, 429, 9L)));
         assertThat(mailbox.getMailMessagesSentTo(email).size(), equalTo(3));
         assertThat(TestSql.count(dataSource, "select count(*) from login_mail"), equalTo(3L));
     }
@@ -362,7 +368,7 @@ class LoginResourceTest {
             verifier.setAutoCommit(false);
             TestSql.execute(verifier, "select 1 from login_code where email_hash = ? for update", emailHash);
             Future<Integer> request = executor.submit(() -> postCode(email).extract().statusCode());
-            lockWaiters = awaitLockWaiter();
+            lockWaiters = TestSql.awaitLockWaiters(dataSource, 1);
             TestSql.execute(verifier, "delete from login_code where email_hash = ?", emailHash);
             verifier.commit();
             status = request.get();
@@ -371,9 +377,72 @@ class LoginResourceTest {
         // then
         assertThat(lockWaiters, equalTo(1L));
         assertThat(status, equalTo(202));
-        List<Object> stored = TestSql.row(dataSource,
-                "select code_hash, attempts from login_code where email_hash = ?", emailHash);
-        assertThat(stored, equalTo(List.of(LoginCodes.hash(email, sentCode(email)), 0)));
+        List<Object> stored = TestSql.row(dataSource, """
+                select email_hash, code_hash, attempts, expires_at - created_at = interval '10 minutes',
+                       now() - created_at < interval '1 minute'
+                from login_code where email_hash = ?
+                """, emailHash);
+        assertThat(stored, equalTo(List.of(emailHash, LoginCodes.hash(email, sentCode(email)), 0, true, true)));
+    }
+
+    @Test
+    void shouldRefuseAndRecover_whenRequestCode_givenCodeRowLockedPastTimeout() throws SQLException {
+        // given
+        String email = TestPlayers.uniqueEmail("row-held");
+        requestCode(email);
+        String emailHash = Sessions.hash(email);
+        List<Object> expected = TestSql.row(dataSource, LOGIN_CODE_ROW, emailHash);
+
+        // when
+        ValidatableResponse response;
+        try (Connection verifier = dataSource.getConnection()) {
+            verifier.setAutoCommit(false);
+            TestSql.execute(verifier, "select 1 from login_code where email_hash = ? for update", emailHash);
+            response = postCode(email);
+            verifier.rollback();
+        }
+
+        // then
+        response.statusCode(429).body("error", equalTo(ApiException.RATE_LIMITED));
+        assertThat(mailbox.getMailMessagesSentTo(email).size(), equalTo(1));
+        assertThat(TestSql.row(dataSource, LOGIN_CODE_ROW, emailHash), equalTo(expected));
+        postCode(email).statusCode(202);
+    }
+
+    // Two requests wait for the table lock and hold both of the instance's
+    // request slots, so a third is refused without waiting.
+    @Test
+    void shouldRefuseAtOnce_whenRequestCode_givenTwoRequestsWaitingForLock() throws Exception {
+        // given
+        String email = TestPlayers.uniqueEmail("third-in-line");
+
+        // when
+        long waitersBefore;
+        ValidatableResponse third;
+        long waitersAfter;
+        List<Integer> waitingStatuses;
+        try (ExecutorService executor = Executors.newFixedThreadPool(2);
+             Connection otherInstance = dataSource.getConnection()) {
+            otherInstance.setAutoCommit(false);
+            TestSql.execute(otherInstance, "lock table login_mail in exclusive mode");
+            Future<Integer> first = executor.submit(
+                    () -> postCode(TestPlayers.uniqueEmail("first-in-line")).extract().statusCode());
+            Future<Integer> second = executor.submit(
+                    () -> postCode(TestPlayers.uniqueEmail("second-in-line")).extract().statusCode());
+            waitersBefore = TestSql.awaitLockWaiters(dataSource, 2);
+            third = postCode(email);
+            waitersAfter = TestSql.lockWaiters(dataSource);
+            otherInstance.rollback();
+            waitingStatuses = List.of(first.get(), second.get());
+        }
+
+        // then
+        assertThat(waitersBefore, equalTo(2L));
+        third.statusCode(429).body("error", equalTo(ApiException.RATE_LIMITED));
+        assertThat(waitersAfter, equalTo(2L));
+        assertThat(waitingStatuses, equalTo(List.of(202, 202)));
+        assertThat(mailbox.getMailMessagesSentTo(email).size(), equalTo(0));
+        postCode(email).statusCode(202);
     }
 
     @Test
@@ -445,12 +514,18 @@ class LoginResourceTest {
     }
 
     @Test
-    void shouldLogIntoAccountAndLeaveGuest_whenVerify_givenGuestOnDevice() throws SQLException {
+    void shouldLogIntoAccountAndLeaveGuest_whenVerify_givenGuestOfOtherKindOnDevice() throws SQLException {
         // given
         String email = TestPlayers.uniqueEmail("owner");
         String accountToken = createAccount("Owner", email);
-        String guestToken = TestPlayers.createGuest("Visitor", Rules.KIND_HUMAN);
+        UUID accountId = playerId(accountToken);
+        String guestToken = TestPlayers.createGuest("Visitor", Rules.KIND_AGENT);
         UUID guestId = playerId(guestToken);
+        submitClear(guestToken, 2, 900, 1);
+        submitRun(guestToken, 1, 40, 900);
+        List<Object> expectedGuest = TestSql.row(dataSource, PLAYER_ROW, guestId);
+        List<List<Object>> expectedClears = clearsOf(guestId);
+        List<List<Object>> expectedRuns = runsOf(guestId);
         String code = requestCode(email);
 
         // when
@@ -459,10 +534,72 @@ class LoginResourceTest {
         // then
         assertThat(response.statusCode(), equalTo(200));
         assertThat(response.as(LoginView.class), equalTo(new LoginView("Owner", Rules.KIND_HUMAN, true, email, false)));
-        assertThat(playerId(tokenIn(response)), equalTo(playerId(accountToken)));
-        List<Object> guest = TestSql.row(dataSource, "select nick, email from player where id = ?", guestId);
-        assertThat(guest, equalTo(Arrays.<Object>asList("Visitor", null)));
+        assertThat(playerId(tokenIn(response)), equalTo(accountId));
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, guestId), equalTo(expectedGuest));
+        assertThat(clearsOf(guestId), equalTo(expectedClears));
+        assertThat(runsOf(guestId), equalTo(expectedRuns));
+        assertThat(clearsOf(accountId), equalTo(List.of()));
+        assertThat(runsOf(accountId), equalTo(List.of()));
         given().cookie(TestPlayers.COOKIE, guestToken).when().get("/players/me").then().statusCode(401);
+    }
+
+    @Test
+    void shouldMoveResultsAndDeleteGuest_whenVerify_givenGuestOfSameKindOnDevice() throws SQLException {
+        // given
+        String email = TestPlayers.uniqueEmail("merge-target");
+        String accountToken = createAccount("MergeTarget", Rules.KIND_AGENT, email);
+        UUID accountId = playerId(accountToken);
+        submitRun(accountToken, 1, 10, 900);
+        String guestToken = TestPlayers.createGuest("MergedGuest", Rules.KIND_AGENT);
+        UUID guestId = playerId(guestToken);
+        submitClear(guestToken, 4, 1200, 3);
+        submitRun(guestToken, Rules.LEVEL_MAX, Rules.RUN_SCORE_MAX, Rules.LEVEL_MAX * Rules.TICKS_FLOOR);
+        String accountRow = """
+                select id, nick, nick_key, kind, email, created_at, now() - last_seen_at < interval '1 minute'
+                from player where id = ?
+                """;
+        List<Object> expectedAccount = TestSql.row(dataSource, accountRow, accountId);
+        List<List<Object>> expectedClears = movedTo(accountId, clearsOf(guestId));
+        List<List<Object>> expectedRuns = new ArrayList<>(runsOf(accountId));
+        expectedRuns.addAll(movedTo(accountId, runsOf(guestId)));
+        String code = requestCode(email);
+
+        // when
+        ExtractableResponse<Response> response = verify(guestToken, email, code).extract();
+
+        // then
+        assertThat(response.statusCode(), equalTo(200));
+        assertThat(response.as(LoginView.class),
+                equalTo(new LoginView("MergeTarget", Rules.KIND_AGENT, true, email, true)));
+        assertThat(playerId(tokenIn(response)), equalTo(accountId));
+        assertThat(TestSql.row(dataSource, accountRow, accountId), equalTo(expectedAccount));
+        assertThat(clearsOf(accountId), equalTo(expectedClears));
+        assertThat(runsOf(accountId), equalTo(expectedRuns));
+        assertThat(rowsOf(guestId), equalTo(List.of(0L, 0L, 0L, 0L)));
+        given().queryParam("kind", Rules.KIND_AGENT).when().get("/boards/records").then()
+                .body("entries.findAll { it.nick == 'MergeTarget' }.levelsCleared", equalTo(List.of(Rules.LEVEL_MAX)))
+                .body("entries.nick", not(hasItem("MergedGuest")));
+    }
+
+    @Test
+    void shouldMergeNothing_whenVerify_givenSameAccountAlreadyOnDevice() throws SQLException {
+        // given
+        String email = TestPlayers.uniqueEmail("already-in");
+        String accountToken = createAccount("AlreadyIn", email);
+        UUID accountId = playerId(accountToken);
+        submitRun(accountToken, 1, 10, 900);
+        List<List<Object>> expectedRuns = runsOf(accountId);
+        String code = requestCode(email);
+
+        // when
+        ExtractableResponse<Response> response = verify(accountToken, email, code).extract();
+
+        // then
+        assertThat(response.statusCode(), equalTo(200));
+        assertThat(response.as(LoginView.class),
+                equalTo(new LoginView("AlreadyIn", Rules.KIND_HUMAN, true, email, false)));
+        assertThat(playerId(tokenIn(response)), equalTo(accountId));
+        assertThat(runsOf(accountId), equalTo(expectedRuns));
     }
 
     @Test
@@ -479,6 +616,29 @@ class LoginResourceTest {
         // then
         response.statusCode(400).body("error", equalTo(ApiException.INVALID_CODE));
         assertThat(TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email)), equalTo(expected));
+    }
+
+    @Test
+    void shouldAnswerTheSame_whenVerify_givenWrongCodeForEmailWithAndWithoutAccount() {
+        // given
+        String accountEmail = TestPlayers.uniqueEmail("wrong-known");
+        createAccount("WrongKnown", accountEmail);
+        String accountCode = requestCode(accountEmail);
+        String newEmail = TestPlayers.uniqueEmail("wrong-unknown");
+        String newCode = requestCode(newEmail);
+        String guestToken = TestPlayers.createGuest("WrongGuesser", Rules.KIND_HUMAN);
+
+        // when
+        ExtractableResponse<Response> known = verify(guestToken, accountEmail, otherCode(accountCode)).extract();
+        ExtractableResponse<Response> unknown = verify(guestToken, newEmail, otherCode(newCode)).extract();
+
+        // then
+        assertThat(known.statusCode(), equalTo(400));
+        assertThat(unknown.statusCode(), equalTo(400));
+        assertThat(known.body().asString(), equalTo("{\"error\":\"invalid_code\"}"));
+        assertThat(unknown.body().asString(), equalTo(known.body().asString()));
+        assertThat(known.header("Set-Cookie"), nullValue());
+        assertThat(unknown.header("Set-Cookie"), nullValue());
     }
 
     @Test
@@ -622,11 +782,12 @@ class LoginResourceTest {
         assertThat(TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email)), equalTo(expected));
     }
 
+    // The guest came first: once an account holds the key, no guest can take it.
     @Test
     void shouldRefuseNickTakenAndKeepGuest_whenVerify_givenAccountHoldsGuestsNickKey() throws SQLException {
         // given
-        createAccount("Holder", TestPlayers.uniqueEmail("holder"));
         String guestToken = TestPlayers.createGuest("HOLDER", Rules.KIND_AGENT);
+        createAccount("Holder", TestPlayers.uniqueEmail("holder"));
         String email = TestPlayers.uniqueEmail("copycat");
         String code = requestCode(email);
 
@@ -639,6 +800,68 @@ class LoginResourceTest {
                 .then().statusCode(200).body("account", equalTo(false)).body("email", nullValue());
         assertThat(TestSql.count(dataSource, "select count(*) from player where email = ?", email), equalTo(0L));
         assertThat(codeRowsFor(email), equalTo(0L));
+    }
+
+    // The other connection plays an instance that gives an account the
+    // guest's nick key after this verify has checked it.
+    @Test
+    void shouldRefuseNickTakenAndKeepCode_whenVerify_givenAccountTakesNickKeyMeanwhile() throws Exception {
+        // given
+        String guestToken = TestPlayers.createGuest("LateRacer", Rules.KIND_HUMAN);
+        UUID guestId = playerId(guestToken);
+        List<Object> expectedGuest = TestSql.row(dataSource, PLAYER_ROW, guestId);
+        String email = TestPlayers.uniqueEmail("late-racer");
+        String code = requestCode(email);
+        List<Object> expectedCode = TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email));
+
+        // when
+        long lockWaiters;
+        ExtractableResponse<Response> response;
+        try (ExecutorService executor = Executors.newSingleThreadExecutor();
+             Connection otherInstance = dataSource.getConnection()) {
+            otherInstance.setAutoCommit(false);
+            TestPlayers.insertAccount(otherInstance, "LATERACER", TestPlayers.uniqueEmail("early-racer"));
+            Future<ExtractableResponse<Response>> request = executor.submit(
+                    () -> verify(guestToken, email, code).extract());
+            lockWaiters = TestSql.awaitLockWaiters(dataSource, 1);
+            otherInstance.commit();
+            response = request.get();
+        }
+
+        // then
+        assertThat(lockWaiters, equalTo(1L));
+        assertThat(response.statusCode(), equalTo(409));
+        assertThat(response.body().asString(), equalTo("{\"error\":\"nick_taken\"}"));
+        assertThat(response.header("Set-Cookie"), nullValue());
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, guestId), equalTo(expectedGuest));
+        assertThat(TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email)), equalTo(expectedCode));
+        given().cookie(TestPlayers.COOKIE, guestToken).when().get("/players/me")
+                .then().statusCode(200).body("account", equalTo(false));
+    }
+
+    @Test
+    void shouldLeaveNothingOfPlayerOrEmail_whenDelete_givenAccountWithResultsCodeAndTwoDevices() throws SQLException {
+        // given
+        String email = TestPlayers.uniqueEmail("leaving-for-good");
+        String firstDevice = createAccount("GoneForGood", email);
+        UUID accountId = playerId(firstDevice);
+        verify(null, email, requestCode(email)).statusCode(200);
+        submitClear(firstDevice, 1, 800, 2);
+        submitRun(firstDevice, 2, 70, 1600);
+        postCode(email).statusCode(202);
+        assertThat(codeRowsFor(email), equalTo(1L));
+        String staying = TestPlayers.createGuest("StaysBehind", Rules.KIND_HUMAN);
+
+        // when
+        ValidatableResponse response = given().cookie(TestPlayers.COOKIE, firstDevice).when().delete("/players/me")
+                .then();
+
+        // then
+        response.statusCode(204).header("Set-Cookie", CLEARED_COOKIE);
+        assertThat(rowsOf(accountId), equalTo(List.of(0L, 0L, 0L, 0L)));
+        assertThat(codeRowsFor(email), equalTo(0L));
+        assertThat(tablesHolding(email), equalTo(List.of()));
+        given().cookie(TestPlayers.COOKIE, staying).when().get("/players/me").then().statusCode(200);
     }
 
     @Test
@@ -738,9 +961,61 @@ class LoginResourceTest {
     }
 
     private String createAccount(String nick, String email) {
-        String guestToken = TestPlayers.createGuest(nick, Rules.KIND_HUMAN);
+        return createAccount(nick, Rules.KIND_HUMAN, email);
+    }
+
+    private String createAccount(String nick, String kind, String email) {
+        String guestToken = TestPlayers.createGuest(nick, kind);
         return tokenIn(verify(guestToken, email, requestCode(email)).statusCode(200).extract());
     }
+
+    private static void submitClear(String token, int level, int ticks, int chests) {
+        given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON)
+                .body(Map.of("level", level, "shape", Rules.SHAPE_PORTRAIT, "revision", Rules.currentRevision(level),
+                        "ticks", ticks, "chests", chests, "chestsTotal", 5))
+                .when().post("/clears").then().statusCode(201);
+    }
+
+    private static void submitRun(String token, int levelsCleared, int score, int ticks) {
+        given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON)
+                .body(Map.of("levelsCleared", levelsCleared, "score", score, "ticks", ticks))
+                .when().post("/runs").then().statusCode(201);
+    }
+
+    // The player id comes second in both, so a moved row differs only there.
+    private List<List<Object>> clearsOf(UUID playerId) throws SQLException {
+        return TestSql.rows(dataSource, """
+                select id, player_id, level, shape, revision, ticks, chests, chests_total, created_at
+                from level_clear where player_id = ? order by id
+                """, playerId);
+    }
+
+    private List<List<Object>> runsOf(UUID playerId) throws SQLException {
+        return TestSql.rows(dataSource, """
+                select id, player_id, levels_cleared, score, ticks_total, finished_at
+                from game_run where player_id = ? order by id
+                """, playerId);
+    }
+
+    private static List<List<Object>> movedTo(UUID playerId, List<List<Object>> rows) {
+        List<List<Object>> moved = new ArrayList<>();
+        for (List<Object> row : rows) {
+            List<Object> movedRow = new ArrayList<>(row);
+            movedRow.set(1, playerId);
+            moved.add(movedRow);
+        }
+        return moved;
+    }
+
+    private List<Object> rowsOf(UUID playerId) throws SQLException {
+        return TestSql.row(dataSource, """
+                select (select count(*) from player where id = ?),
+                       (select count(*) from session where player_id = ?),
+                       (select count(*) from level_clear where player_id = ?),
+                       (select count(*) from game_run where player_id = ?)
+                """, playerId, playerId, playerId, playerId);
+    }
+
 
     private UUID playerId(String token) throws SQLException {
         return (UUID) TestSql.row(dataSource, "select player_id from session where token_hash = ?",
@@ -801,18 +1076,6 @@ class LoginResourceTest {
         return matcher.group(1);
     }
 
-    private long awaitLockWaiter() throws SQLException, InterruptedException {
-        long waiters = lockWaiters();
-        for (int attempt = 1; 0 == waiters && LOCK_POLLS > attempt; attempt++) {
-            Thread.sleep(100);
-            waiters = lockWaiters();
-        }
-        return waiters;
-    }
-
-    private long lockWaiters() throws SQLException {
-        return TestSql.count(dataSource, "select count(*) from pg_stat_activity where wait_event_type = 'Lock'");
-    }
 
     private static Map<Integer, Long> inParallel(List<Callable<Integer>> requests) throws InterruptedException {
         Map<Integer, Long> statusCounts;

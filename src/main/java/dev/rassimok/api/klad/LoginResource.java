@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.mailer.Mailer;
 import io.vertx.ext.mail.SMTPException;
 import jakarta.inject.Inject;
+import jakarta.persistence.LockModeType;
 import jakarta.persistence.PessimisticLockException;
 import jakarta.transaction.Transactional;
 import jakarta.ws.rs.Consumes;
@@ -27,6 +28,8 @@ public class LoginResource {
     private static final Logger LOG = Logger.getLogger(LoginResource.class);
     private static final String FIELD_EMAIL = "email";
     private static final String FIELD_CODE = "code";
+    // Enough for any real chain of wrapped exceptions; it also ends a cycle.
+    private static final int CAUSES_FOLLOWED = 10;
 
     @Inject
     Sessions sessions;
@@ -48,12 +51,18 @@ public class LoginResource {
         if (!Emails.isValid(email)) {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_EMAIL);
         }
+        if (!loginCodes.tryTakeRequestSlot()) {
+            throw new ApiException(Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
+        }
         String code;
         try {
             code = loginCodes.issue(email, Instant.now());
         } catch (PessimisticLockException e) {
             // Code requests wait at most 2 s for their lock; in a flood, try later.
             throw new ApiException(Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
+        } finally {
+            // Released before the mail goes out, which can take up to 60 s.
+            loginCodes.releaseRequestSlot();
         }
         try {
             mailer.send(LoginCodes.mail(email, code));
@@ -90,9 +99,14 @@ public class LoginResource {
         if (null != deviceSession) {
             deviceSession.delete();
         }
+        boolean isGuestOfSameKind = null != devicePlayer && null == devicePlayer.email
+                && player.kind.equals(devicePlayer.kind);
+        if (isGuestOfSameKind) {
+            mergeGuest(devicePlayer, player);
+        }
         player.lastSeenAt = now;
         String newToken = sessions.create(player, now);
-        return RestResponse.ResponseBuilder.ok(LoginView.of(player, false))
+        return RestResponse.ResponseBuilder.ok(LoginView.of(player, isGuestOfSameKind))
                 .header(HttpHeaders.SET_COOKIE, Sessions.cookie(newToken))
                 .build();
     }
@@ -108,9 +122,10 @@ public class LoginResource {
                 .build();
     }
 
-    private static Throwable rootCause(Throwable throwable) {
+    static Throwable rootCause(Throwable throwable) {
         Throwable root = throwable;
-        while (null != root.getCause() && root != root.getCause()) {
+        for (int followed = 0; CAUSES_FOLLOWED > followed && null != root.getCause() && root != root.getCause();
+             followed++) {
             root = root.getCause();
         }
         return root;
@@ -121,10 +136,20 @@ public class LoginResource {
         if (!isGuest) {
             throw new ApiException(Response.Status.UNAUTHORIZED, ApiException.NO_SESSION);
         }
-        if (0 < Player.count("nickKey = ?1 and email is not null", devicePlayer.nickKey)) {
+        if (Player.isNickKeyTaken(devicePlayer.nickKey, devicePlayer.id)) {
             throw new ApiException(Response.Status.CONFLICT, ApiException.NICK_TAKEN);
         }
         devicePlayer.email = email;
+        Player.flushNickKey();
         return devicePlayer;
+    }
+
+    // The guest's row is locked as a result submission locks it, so a
+    // submission already under way is moved too instead of going with the guest.
+    private static void mergeGuest(Player guest, Player account) {
+        Player.getEntityManager().lock(guest, LockModeType.PESSIMISTIC_WRITE);
+        LevelClear.update("playerId = ?1 where playerId = ?2", account.id, guest.id);
+        GameRun.update("playerId = ?1 where playerId = ?2", account.id, guest.id);
+        guest.delete();
     }
 }
