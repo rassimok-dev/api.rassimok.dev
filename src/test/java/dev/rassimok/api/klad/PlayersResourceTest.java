@@ -316,7 +316,7 @@ class PlayersResourceTest {
         UUID playerId = (UUID) TestSql.row(dataSource, "select player_id from session where token_hash = ?",
                 Sessions.hash(token)).getFirst();
         given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON)
-                .body(Map.of("level", 1, "shape", Rules.SHAPE_LANDSCAPE, "revision", 1,
+                .body(Map.of("level", 1, "shape", Rules.SHAPE_LANDSCAPE, "revision", Rules.currentRevision(1),
                         "ticks", 700, "chests", 1, "chestsTotal", 2))
                 .when().post("/clears").then().statusCode(201);
         given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON)

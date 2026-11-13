@@ -39,6 +39,9 @@ class ResponseHeadersTest {
     @TestHTTPResource("/players")
     URI playersUri;
 
+    @TestHTTPResource("/players/me")
+    URI playerUri;
+
     static Stream<Arguments> errors() {
         return Stream.of(
                 Arguments.of("GET", "/nowhere", null, null, 404, "not_found"),
@@ -51,7 +54,7 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/players", "*/*", PLAYER_BODY, 415, "unsupported_media_type"),
                 Arguments.of("POST", "/players", "application/*", PLAYER_BODY, 415, "unsupported_media_type"),
                 Arguments.of("POST", "/players", "application/json; version=2", PLAYER_BODY, 415, "unsupported_media_type"),
-                Arguments.of("GET", "/boards/records", "garbage", "x", 415, "unsupported_media_type"),
+                Arguments.of("POST", "/clears", "garbage", "{\"level\":1}", 415, "unsupported_media_type"),
                 Arguments.of("POST", "/players", "application/json", "{\"nick\":", 400, "bad_request"),
                 Arguments.of("POST", "/players", "application/json", "{\"nick\":\"Bob\",\"kind\":[1]}", 400, "invalid_kind"),
                 Arguments.of("POST", "/players", "application/json", "{\"nick\":12345,\"kind\":\"human\"}", 400, "invalid_nick"),
@@ -110,10 +113,63 @@ class ResponseHeadersTest {
     }
 
     @Test
+    void shouldIgnoreBody_whenGetBoard_givenBodyWithMalformedContentType() {
+        // when
+        ValidatableResponse response = given()
+                .contentType("garbage")
+                .body("x".getBytes(StandardCharsets.UTF_8))
+                .when().get("/boards/records")
+                .then();
+
+        // then
+        assertSecurityHeaders(response.statusCode(200));
+    }
+
+    // The proxy may forward a bodiless request as an empty chunked body.
+    @Test
+    void shouldDeletePlayer_whenDeletePlayer_givenEmptyChunkedBodyWithoutContentType() throws Exception {
+        // given
+        String token = TestPlayers.createGuest("Chunked", Rules.KIND_HUMAN);
+        HttpRequest request = HttpRequest.newBuilder(playerUri)
+                .header("Cookie", TestPlayers.COOKIE + "=" + token)
+                .method("DELETE", HttpRequest.BodyPublishers.ofInputStream(() -> new ByteArrayInputStream(new byte[0])))
+                .build();
+
+        // when
+        HttpResponse<String> response;
+        try (HttpClient client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()) {
+            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+
+        // then
+        assertThat(response.statusCode(), equalTo(204));
+        given().cookie(TestPlayers.COOKIE, token).when().get("/players/me")
+                .then().statusCode(401).body("error", equalTo(ApiException.NO_SESSION));
+    }
+
+    @Test
     void shouldAnswerUnsupportedMediaType_whenSubmitClear_givenBodyWithoutContentType() throws Exception {
         // given
         HttpRequest request = HttpRequest.newBuilder(clearsUri)
                 .POST(HttpRequest.BodyPublishers.ofString("{\"level\":1}"))
+                .build();
+
+        // when
+        HttpResponse<String> response;
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+
+        // then
+        assertThat(response.statusCode(), equalTo(415));
+        assertThat(response.body(), equalTo("{\"error\":\"unsupported_media_type\"}"));
+    }
+
+    @Test
+    void shouldAnswerUnsupportedMediaType_whenSubmitClear_givenNoBodyAndNoContentType() throws Exception {
+        // given
+        HttpRequest request = HttpRequest.newBuilder(clearsUri)
+                .POST(HttpRequest.BodyPublishers.noBody())
                 .build();
 
         // when

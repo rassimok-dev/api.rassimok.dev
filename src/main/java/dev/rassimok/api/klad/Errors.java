@@ -1,5 +1,6 @@
 package dev.rassimok.api.klad;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.vertx.core.http.HttpServerResponse;
 import jakarta.inject.Singleton;
@@ -10,8 +11,10 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 import org.jboss.resteasy.reactive.server.ServerRequestFilter;
+import org.jboss.resteasy.reactive.server.SimpleResourceInfo;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -36,12 +39,13 @@ public class Errors {
         return status.name().toLowerCase(Locale.ROOT);
     }
 
-    // @Consumes alone lets a body without a content type, or sent as
-    // application/octet-stream, through to the JSON reader.
+    // Only methods that take a JsonNode body are checked: @Consumes alone lets a
+    // body with no content type, or application/octet-stream, reach the reader.
+    // The others ignore any body; the proxy may forward an empty chunked one.
     @ServerRequestFilter
-    public Optional<Response> refuseNonJsonBody(ContainerRequestContext request) {
-        boolean hasBody = 0 < request.getLength() || null != request.getHeaderString("Transfer-Encoding");
-        boolean shouldRefuse = hasBody && !isJson(parsedMediaType(request));
+    public Optional<Response> refuseNonJsonBody(ContainerRequestContext request, SimpleResourceInfo resource) {
+        boolean isBodyEndpoint = Arrays.asList(resource.parameterTypes()).contains(JsonNode.class);
+        boolean shouldRefuse = isBodyEndpoint && !isJson(parsedMediaType(request));
         Response.Status status = Response.Status.UNSUPPORTED_MEDIA_TYPE;
         return shouldRefuse ? Optional.of(response(status, codeFor(status))) : Optional.empty();
     }

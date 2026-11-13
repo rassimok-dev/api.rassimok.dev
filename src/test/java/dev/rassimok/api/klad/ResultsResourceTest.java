@@ -6,6 +6,7 @@ import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.sql.DataSource;
@@ -19,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -28,7 +30,7 @@ import static org.hamcrest.Matchers.equalTo;
 class ResultsResourceTest {
 
     private static final Map<String, Object> CLEAR = Map.of("level", 2, "shape", Rules.SHAPE_PORTRAIT,
-            "revision", 1, "ticks", 1500, "chests", 4, "chestsTotal", 7);
+            "revision", Rules.currentRevision(2), "ticks", 1500, "chests", 4, "chestsTotal", 7);
     private static final Map<String, Object> RUN = Map.of("levelsCleared", 2, "score", 4200, "ticks", 9000);
 
     @Inject
@@ -48,7 +50,7 @@ class ResultsResourceTest {
                 select level, shape, revision, ticks, chests, chests_total, now() - created_at < interval '1 minute'
                 from level_clear where player_id = ?
                 """, playerId(token));
-        assertThat(stored, equalTo(List.of(2, Rules.SHAPE_PORTRAIT, 1, 1500, 4, 7, true)));
+        assertThat(stored, equalTo(List.of(2, Rules.SHAPE_PORTRAIT, Rules.currentRevision(2), 1500, 4, 7, true)));
     }
 
     @Test
@@ -84,20 +86,27 @@ class ResultsResourceTest {
         assertThat(stored, equalTo(List.of(2, 4200, 9000, true)));
     }
 
+    // %1$d is the current revision of level 1, %2$d the one after it.
+    static Stream<String> invalidClears() {
+        int revision = Rules.currentRevision(1);
+        return Stream.of(
+                "{\"level\":6,\"shape\":\"portrait\",\"revision\":%1$d,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":1,\"shape\":\"square\",\"revision\":%1$d,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":1,\"shape\":\"portrait\",\"revision\":%2$d,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":1,\"shape\":\"portrait\",\"revision\":0,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":1,\"shape\":\"portrait\",\"revision\":%1$d,\"ticks\":599,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":1,\"shape\":\"portrait\",\"revision\":%1$d,\"ticks\":900,\"chests\":3,\"chestsTotal\":2}",
+                "{\"level\":1,\"shape\":\"portrait\",\"revision\":%1$d,\"ticks\":900,\"chestsTotal\":1}",
+                "{\"level\":true,\"shape\":\"portrait\",\"revision\":%1$d,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":1,\"shape\":\"portrait\",\"revision\":%1$d,\"ticks\":99999999999,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":1,\"shape\":\"portrait\",\"revision\":%1$d,\"ticks\":900.5,\"chests\":0,\"chestsTotal\":1}",
+                "[]",
+                "")
+                .map(body -> body.formatted(revision, revision + 1));
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {
-            "{\"level\":6,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
-            "{\"level\":1,\"shape\":\"square\",\"revision\":1,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
-            "{\"level\":1,\"shape\":\"portrait\",\"revision\":2,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
-            "{\"level\":1,\"shape\":\"portrait\",\"revision\":0,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
-            "{\"level\":1,\"shape\":\"portrait\",\"revision\":1,\"ticks\":599,\"chests\":0,\"chestsTotal\":1}",
-            "{\"level\":1,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900,\"chests\":3,\"chestsTotal\":2}",
-            "{\"level\":1,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900,\"chestsTotal\":1}",
-            "{\"level\":true,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
-            "{\"level\":1,\"shape\":\"portrait\",\"revision\":1,\"ticks\":99999999999,\"chests\":0,\"chestsTotal\":1}",
-            "{\"level\":1,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900.5,\"chests\":0,\"chestsTotal\":1}",
-            "[]",
-            ""})
+    @MethodSource("invalidClears")
     void shouldRejectAndStoreNothing_whenSubmitClear_givenInvalidClear(String body) throws SQLException {
         // given
         String token = TestPlayers.createGuest("Cheater", Rules.KIND_HUMAN);

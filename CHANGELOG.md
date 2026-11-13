@@ -58,10 +58,10 @@ read the boards. The game calls these through the site's proxy at
   `@QuarkusTest` classes cover the cookie, the session refresh, every
   endpoint, ordering, kinds apart, the rate limit (also 40 clears sent in
   parallel), a forged revision, clears of another revision left in the
-  table, delete, a database failure, the content types, the body limit and
-  the headers. `BodyLimitLogTest` checks that a chunked body over the limit
-  logs no warning or error; it runs on the JVM only, where the test can
-  read the log.
+  table, delete (also with an empty chunked body), a database failure, the
+  content types, the body limit and the headers. `BodyLimitLogTest` checks
+  that a chunked body over the limit logs no warning or error; it runs on
+  the JVM only, where the test can read the log.
   Two native tests run the same HTTP checks against the binary.
   `KladRoundTripIT` creates guests (NFKC and Cyrillic nicks), submits a
   clear and a run, reads all three boards, renames and deletes.
@@ -120,15 +120,31 @@ read the boards. The game calls these through the site's proxy at
   and turns a number beyond 32 bits into a framework 400. Reading the tree
   accepts only a real JSON integer or string, so every such case gets the
   contract's code.
-- **A body must be sent as `application/json`.** `@Consumes` alone lets a
-  body with no `Content-Type`, or one sent as `application/octet-stream`,
-  through to the JSON reader (measured). A request filter answers 415 for
-  any other type. It compares type and subtype itself and allows only a
+- **Only endpoints that read a JSON body require `application/json`.**
+  `POST /players`, `PATCH /players/me`, `POST /clears` and `POST /runs`
+  answer 415 for any other type and for none, with or without a body.
+  `@Consumes` alone lets a body with no `Content-Type`, or one sent as
+  `application/octet-stream`, through to the JSON reader (measured). A
+  request filter therefore checks every resource method that takes a
+  `JsonNode` body. It compares type and subtype itself and allows only a
   `charset` parameter: `MediaType.isCompatible` would let `*/*` and
   `application/*` through, and `application/json; version=2` is not the
   contract's type either. A type that does not parse at all (`garbage`)
-  gets 415 too; found in review, it threw while the filter read it and
-  answered 500 with an error stack in the log, from any anonymous client.
+  gets 415 too: `@Consumes` matching answers it before the filter runs,
+  and the filter would treat it as not JSON. Found in review, the filter
+  used to read the type of every request with a body and threw on such a
+  type, answering 500 with an error stack in the log, from any anonymous
+  client.
+- **Endpoints that read no body ignore any body and its type** (every
+  `GET`, `DELETE /players/me`). Found in the second review: the filter
+  used to check every request that carried a body, and an empty chunked
+  body counted. If the site's proxy forwards a bodiless `DELETE` that way,
+  "delete my nick and results" would answer 415 and the player would stay.
+  Checking the endpoint rather than the bytes that arrived also removes any
+  dependence on the framing; a body sent over HTTP/2 without a length would
+  have slipped past the old check. The filter reads the method's parameter
+  types from `SimpleResourceInfo`, which needs no reflection in the native
+  binary. The contract's section 1 says the same since this change.
 - **`nick_taken` is not checked yet.** Nicks may repeat until account nicks
   become unique in the accounts work, as the contract says.
 - **Request bodies are capped at 4 KB** (`quarkus.http.limits.max-body-size`).
