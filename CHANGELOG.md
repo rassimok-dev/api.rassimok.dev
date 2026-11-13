@@ -3,6 +3,181 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-13 (later still) - Guest players, results and leaderboards for klad
+
+The game can now create a guest, submit level clears and finished runs, and
+read the boards. The game calls these through the site's proxy at
+`rassimok.dev/klad/api/*`; the paths below are the API's own.
+
+- `POST /players` creates a guest from a nick and a kind (`human` or
+  `agent`, required, never changed) and sets the session cookie.
+  `GET`, `PATCH` and `DELETE /players/me` read the player, rename it, or
+  delete it. Deleting also removes its sessions and results (`on delete
+  cascade`) and clears the cookie.
+- `POST /clears` (level, shape, revision, ticks, chests, chests total) and
+  `POST /runs` (levels cleared, score, ticks) store results. Both answer
+  `201 {}`. A clear must carry its level's current revision.
+- `GET /boards/records`, `/boards/level` and `/boards/chests` return the top
+  20, one entry per player, separately for each kind. `kind` defaults to
+  `human`. `/boards/level` takes `level` and `shape` and always shows the
+  level's current revision; a `revision` parameter is ignored.
+- Migration `V2` adds `level_clear` and `game_run`, each with a
+  `player_id` foreign key that cascades on delete. Each has an index on
+  (player, time) for the rate limit; `level_clear` also has one on (level,
+  shape, revision) for the level and chests boards. `V1` is unchanged.
+- Session cookie `klad_session`: 32 `SecureRandom` bytes, base64url.
+  The database stores only the SHA-256 of the token, as lower-case hex. The
+  cookie is sent as `Path=/klad/api; HttpOnly; Secure; SameSite=Strict;
+  Max-Age=7776000`. A request with a session more than a day old moves its
+  expiry to 90 days from now, resends the cookie and updates
+  `last_seen_at`. So each session row is written at most once a day.
+- Nicks are NFKC-normalised and trimmed, then 3 to 16 characters. Allowed
+  are Latin letters `A-Z a-z` or Cyrillic letters (U+0410 to U+044F, plus
+  U+0401 and U+0451 for Yo), never both in one nick, and digits, `_` and
+  `-`. `nick_key` is the lower-case form. Accented Latin letters are
+  refused: "Latin letter" is read as plain A to Z.
+- Every bound lives in one class, `Rules`. That covers the level range and
+  each level's current revision, the tick floor, the tick and score caps,
+  the rate limit and the board size. The contract's field names used by
+  more than one class are constants there too.
+- Every response carries `Cache-Control: no-store`,
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy:
+  default-src 'none'; frame-ancestors 'none'`. That includes errors, the
+  framework's own 404 and `/q/health`. They are set by
+  `quarkus.http.header` in `application.properties`.
+- Errors are `{"error":"<code>"}` with the contract's codes. A missing
+  field, or one of the wrong JSON type, fails the endpoint's own check
+  (`invalid_nick`, `invalid_kind`, `invalid_result`). `PATCH` answers
+  `kind_fixed` whenever the body names `kind`, even as null. Framework
+  errors are named after their HTTP status: `not_found`,
+  `method_not_allowed`, `unsupported_media_type`, `bad_request` for a body
+  that is not JSON at all, and `internal_server_error`, which is logged.
+  The one exception is 413 for a body over 4 KB: it carries the three
+  headers but no body.
+- Tests: unit tests for the nick, kind, revision and result checks.
+  `@QuarkusTest` classes cover the cookie, the session refresh, every
+  endpoint, ordering, kinds apart, the rate limit (also 40 clears sent in
+  parallel), a forged revision, clears of another revision left in the
+  table, delete (also with an empty chunked body), a database failure, the
+  content types, the body limit and the headers. `BodyLimitLogTest` checks
+  that a chunked body over the limit logs no warning or error; it runs on
+  the JVM only, where the test can read the log.
+  Two native tests run the same HTTP checks against the binary.
+  `KladRoundTripIT` creates guests (NFKC and Cyrillic nicks), submits a
+  clear and a run, reads all three boards, renames and deletes.
+  `ResponseHeadersIT` covers the headers and the error bodies. Both passed
+  inside the Mandrel Linux container, so both migrations and the JSON
+  types are in the binary. Ranking lives in SQL, so it is tested against
+  Postgres, not in a unit test.
+
+### Decisions worth not relitigating
+
+- **The rate limit is counted in the database.** Cloud Run may run up to
+  three instances, so a counter in memory would allow three times the
+  limit. Each submission locks its player's row (`PESSIMISTIC_WRITE`,
+  which Hibernate sends as `select ... for no key update` on Postgres)
+  before counting the last 60 seconds of clears and runs. Parallel
+  submissions by one player are therefore counted one after another, and
+  the 31st is refused with 429. Only stored submissions count: a rejected
+  or rate-limited one does not.
+- **One entry per player per board.** A board shows each player's best
+  result, not their latest. Otherwise one player could fill the top 20.
+- **The tick floor is 600 (5 s), a guess.** It sits in `Rules.TICKS_FLOOR`
+  so it can move once real clear times are known. It is deliberately not a
+  database check, so changing it needs no migration. Only the shape is
+  checked in the database, like `kind` in `V1`.
+- **The API knows each level's current revision** (`Rules.LEVEL_REVISIONS`,
+  mirroring `klad/levels.js` in the site repository; every level is 1
+  today). `POST /clears` refuses any other revision with 400
+  `invalid_result`, and the level and chests boards count only clears at
+  the current revision. The first version accepted revisions 1 to 1000,
+  and the chests board counted the newest revision that anyone had
+  cleared. Found in review: one forged clear with a higher revision, from
+  any guest, removed that level and shape from every player's total on
+  both kinds' boards, and ten such clears left only the forger. It stayed
+  so until the rows were deleted by hand. A forged score only adds one
+  entry; this wiped everyone else's. This is plan 3.4's "known level and
+  revision" check. The other option was to let the game pass its
+  revisions to the boards, which needs no deploy order but still stores
+  whatever revision a client sends.
+- **A layout change needs the API first.** Bumping a revision in
+  `levels.js` means changing `Rules.LEVEL_REVISIONS` too, and the API must
+  deploy before the game: until then, clears of the new revision get 400
+  and are lost (the game ignores failed sends). Clears of the old revision
+  stay in the table and stop counting, so a changed layout starts its
+  boards empty.
+- **No CORS.** The game reaches the API through the same origin (the
+  site's proxy), so no browser needs a cross-origin answer. Scripts and
+  agents can call `api.rassimok.dev` directly, which is fine. A
+  `SameSite=Strict` cookie and the JSON-only request bodies keep other
+  sites from acting for a player.
+- **The security headers are set by the API itself.** Pages applies the
+  site's `_headers` to static files only, not to what the proxy function
+  returns. `no-store` keeps one player's data out of any cache, and the
+  CSP and `nosniff` stop a JSON answer from ever being run as a page.
+- **Request bodies are read as JSON trees, not bound to records.**
+  Binding to a record coerces `900.5` to 900 and `"3"` to 3 (measured),
+  and turns a number beyond 32 bits into a framework 400. Reading the tree
+  accepts only a real JSON integer or string, so every such case gets the
+  contract's code.
+- **Only endpoints that read a JSON body require `application/json`.**
+  `POST /players`, `PATCH /players/me`, `POST /clears` and `POST /runs`
+  answer 415 for any other type and for none, with or without a body.
+  `@Consumes` alone lets a body with no `Content-Type`, or one sent as
+  `*/*`, `application/*` or `application/json; version=2`, through to the
+  JSON reader (measured); it does refuse `application/octet-stream`. A
+  request filter therefore checks every resource method that takes a
+  `JsonNode` body (a subtype such as `ObjectNode` counts too). A body
+  endpoint must take one: the filter would skip a record, `Map` or
+  `String` body without a sign. `ResponseHeadersTest` lists every body
+  endpoint with a 415 row for no type and one for octet-stream, which
+  `ResponseHeadersIT` also runs on the binary; a new body endpoint adds
+  its two rows there. The filter compares type and subtype itself and
+  allows only a `charset` parameter: `MediaType.isCompatible` would let
+  `*/*` and `application/*` through, and `application/json; version=2` is
+  not the contract's type either. A type that does not parse at all
+  (`garbage`) gets 415 too: `@Consumes` matching answers it before the
+  filter runs, and the filter would treat it as not JSON. Found in review,
+  the filter used to read the type of every request with a body and threw
+  on such a type, answering 500 with an error stack in the log, from any
+  anonymous client.
+- **Endpoints that read no body ignore any body and its type** (every
+  `GET`, `DELETE /players/me`). Found in the second review: the filter
+  used to check every request that carried a body, and an empty chunked
+  body counted. If the site's proxy forwards a bodiless `DELETE` that way,
+  "delete my nick and results" would answer 415 and the player would stay.
+  Checking the endpoint rather than the bytes that arrived also removes any
+  dependence on the framing; a body sent over HTTP/2 without a length would
+  have slipped past the old check. The filter reads the method's parameter
+  types from `SimpleResourceInfo`, which needs no reflection in the native
+  binary. The contract's section 1 says the same since this change.
+- **`nick_taken` is not checked yet.** Nicks may repeat until account nicks
+  become unique in the accounts work, as the contract says.
+- **Request bodies are capped at 4 KB** (`quarkus.http.limits.max-body-size`).
+  Real bodies are under 200 bytes. The 10 MB default let anonymous
+  requests fill an instance's 256 MiB: a 10 MB body parsed into a JSON
+  tree held about 309 MB on the JVM (measured in review). Vert.x answers
+  413 itself, so the reply has the three headers but no JSON body. With a
+  chunked body the JSON reader then fails with an `IOException`. A mapper
+  for it hands the exception back to Quarkus once the response has been
+  sent, and Quarkus logs it at debug level only. Before that (found in
+  review), the generic mapper logged it as an error and Quarkus logged a
+  second error for the response already written: about 60 lines and
+  6.6 KB of log per request, needing no session. A script could have
+  multiplied log ingestion, which Cloud Logging bills above the free
+  allowance, and buried real errors. Any other `IOException` while the
+  response is still open stays a logged 500.
+- **Pooled connections idle for over a minute are checked when taken**
+  (`quarkus.datasource.jdbc.foreground-validation-interval=1M`). Neon
+  suspends after 5 idle minutes, and a connection held across that is
+  assumed dead, so the first request after a quiet spell would answer 500.
+  A connection that fails the check is dropped and another is taken.
+  `max-lifetime`, idle removal and background validation all run on a
+  background timer, which gets no CPU while Cloud Run throttles an idle
+  instance, so they cannot fix this. `validate-on-borrow` would also work,
+  but it adds a round trip to Neon to every request, and its own docs
+  advise against it.
+
 ## 2026-11-13 (later) - PostgreSQL wired, first migration, native tests and smoke test in the deploy
 
 The klad leaderboard needs players and sessions, so the datasource that was
