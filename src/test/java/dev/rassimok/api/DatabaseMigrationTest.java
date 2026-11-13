@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -21,6 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class DatabaseMigrationTest {
 
     private static final String CHECK_VIOLATION = "23514";
+    private static final String UNIQUE_VIOLATION = "23505";
+    private static final String INSERT_PLAYER = """
+            insert into player (id, nick, nick_key, kind, email, created_at, last_seen_at)
+            values (gen_random_uuid(), 'Indexed', 'indexed', ?, ?, now(), now())
+            """;
 
     @Inject
     DataSource dataSource;
@@ -74,6 +80,62 @@ class DatabaseMigrationTest {
 
         // then
         assertThat(exception.getSQLState(), equalTo(CHECK_VIOLATION));
+    }
+
+    // In a transaction that is rolled back, so no row is left for other tests.
+    @Test
+    void shouldRejectSecondAccount_whenInsert_givenNickKeyOfAccountOfOtherKind() throws SQLException {
+        // given
+        SQLException exception;
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            insertPlayer(connection, "human", "first-indexed@example.com");
+
+            // when
+            exception = assertThrows(SQLException.class,
+                    () -> insertPlayer(connection, "agent", "second-indexed@example.com"));
+            connection.rollback();
+        }
+
+        // then
+        assertThat(exception.getSQLState(), equalTo(UNIQUE_VIOLATION));
+    }
+
+    @Test
+    void shouldAcceptGuests_whenInsert_givenNickKeyOfAccount() throws SQLException {
+        // given
+        long players;
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            insertPlayer(connection, "human", "indexed@example.com");
+
+            // when
+            insertPlayer(connection, "human", null);
+            insertPlayer(connection, "agent", null);
+            players = count(connection, "select count(*) from player where nick_key = 'indexed'");
+            connection.rollback();
+        }
+
+        // then
+        assertThat(players, equalTo(3L));
+    }
+
+    private static void insertPlayer(Connection connection, String kind, String email) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_PLAYER)) {
+            statement.setString(1, kind);
+            statement.setString(2, email);
+            statement.execute();
+        }
+    }
+
+    private static long count(Connection connection, String sql) throws SQLException {
+        long count;
+        try (Statement statement = connection.createStatement();
+             ResultSet result = statement.executeQuery(sql)) {
+            result.next();
+            count = result.getLong(1);
+        }
+        return count;
     }
 
     private List<String> publicTableNames() throws SQLException {

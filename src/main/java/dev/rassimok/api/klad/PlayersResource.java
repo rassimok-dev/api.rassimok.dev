@@ -48,6 +48,9 @@ public class PlayersResource {
         player.id = UUID.randomUUID();
         player.nick = nick;
         player.nickKey = Nicks.key(nick);
+        if (Player.isNickKeyTaken(player.nickKey, player.id)) {
+            throw new ApiException(Response.Status.CONFLICT, ApiException.NICK_TAKEN);
+        }
         player.kind = kind;
         player.createdAt = now;
         player.lastSeenAt = now;
@@ -80,8 +83,13 @@ public class PlayersResource {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_NICK);
         }
         Player player = signedIn.player();
+        String nickKey = Nicks.key(nick);
+        if (Player.isNickKeyTaken(nickKey, player.id)) {
+            throw new ApiException(Response.Status.CONFLICT, ApiException.NICK_TAKEN);
+        }
         player.nick = nick;
-        player.nickKey = Nicks.key(nick);
+        player.nickKey = nickKey;
+        Player.flushNickKey();
         return Sessions.withRefreshedCookie(RestResponse.ResponseBuilder.ok(PlayerView.of(player)), signedIn);
     }
 
@@ -89,9 +97,14 @@ public class PlayersResource {
     @Path("/me")
     @Transactional
     public RestResponse<Void> delete(@CookieParam(Sessions.COOKIE) String token) {
-        Sessions.SignedIn signedIn = sessions.require(token);
+        Player player = sessions.require(token).player();
+        // The code row before the player: verify locks them in that order, so
+        // deleting them the other way round could deadlock with it.
+        if (null != player.email) {
+            LoginCode.delete("emailHash", Sessions.hash(player.email));
+        }
         // The player's sessions and results go with it: on delete cascade.
-        Player.delete("id", signedIn.player().id);
+        Player.delete("id", player.id);
         return RestResponse.ResponseBuilder.<Void>create(RestResponse.Status.NO_CONTENT)
                 .header(HttpHeaders.SET_COOKIE, Sessions.clearedCookie())
                 .build();

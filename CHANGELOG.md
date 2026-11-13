@@ -3,6 +3,119 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-13 (fifth) - Unique account nicks, guest merge and account deletion
+
+An account's nick now belongs to it, results follow the account to a new
+device, and deleting an account leaves nothing of it behind.
+
+- Nick keys (the NFKC-normalised, trimmed nick in lower case) are unique
+  among accounts, in one pool for both kinds. Migration `V4` adds the
+  partial unique index `player_nick_key_account_idx` on `player (nick_key)
+  where email is not null`; `V1` to `V3` are unchanged, and production has
+  no rows yet.
+- `POST /players` and `PATCH /players/me` answer `409 nick_taken` when an
+  account holds the nick's key, so `Bob`, `BOB`, ` bob ` and full-width
+  letters all count as one. Guests still share nicks with other guests. An
+  account may take a nick that only guests use (they keep it), and may
+  change the case of its own nick.
+- `POST /login/verify`, no account for the email: the device's guest still
+  becomes the account, and gets `409 nick_taken` when an account holds its
+  key. The check runs first; the unique index catches what the check
+  missed (see below).
+- `POST /login/verify` into an existing account A: if the device's guest
+  has A's kind, its `level_clear` and `game_run` rows move to A, the guest
+  and its sessions are deleted in the same transaction, and the answer has
+  `"merged":true`. A guest of the other kind is left as it is, without a
+  session (`"merged":false`, the decision recorded in contract section 5).
+  A device that holds an account, A itself or another, merges nothing. The
+  boards already show one entry per player, its best, so A appears once
+  with the best of both.
+- `DELETE /players/me` for an account also deletes the `login_code` row of
+  its email's hash. The send-log rows (hashes only) go a day later, with the
+  next code request, as the contract says.
+- From the second RAS-23 reviews:
+  - Code requests take one of 2 slots per instance before their
+    transaction (`Rules.CODE_REQUESTS_PER_INSTANCE`, a `Semaphore` in
+    `LoginCodes`). Without a free slot the answer is `429 rate_limited` at
+    once; the slot is released before the mail goes out.
+  - `quarkus.mailer.login=REQUIRED`: without `RESEND_SMTP_KEY` a send fails
+    after the greeting, before any address is sent, and answers 500 like any
+    failed send.
+  - The root-cause walk for the failed-mail log line follows at most 10
+    causes, so a cause cycle cannot spin a thread.
+- Tests:
+  - Unit: one nick key for case, width and decomposed variants (Latin and
+    Cyrillic); a Latin nick with a Cyrillic lookalike is refused, also after
+    NFKC; the bounded cause walk, with a cycle.
+  - `DatabaseMigrationTest`: a second account with the same key is refused
+    (also of the other kind), guests with an account's key are not.
+  - `PlayersResourceTest`: 409 for five variants of an account's nick on
+    create; guests share a nick; a guest's and an account's rename to an
+    account's key; an account's case change; an account taking a guests'
+    nick; and the race: another connection gives an account the key after
+    the check, the rename waits on the index and answers 409.
+  - `LoginResourceTest`: the merge (every column of the moved rows compared,
+    the guest's rows gone, one board entry); another kind left alone, with
+    its results; an account already on the device; the verify race on the
+    index (409, the guest and the code unchanged); deletion of an account
+    with two devices, results and a pending code (no row of the player, no
+    code row, the address in no table); a wrong code answering the same
+    with and without an account; a code row held past 2 s (429); two
+    requests waiting for the lock and a third refused at once.
+  - `LoginMailFailureTest` also checks that the stored code is kept, and
+    `LoginMailWithoutKeyTest` that a send without a key ends before the
+    recipient command (no SMTP reply, no address in the log).
+  - `LoginRoundTripTest`, and so `LoginRoundTripIT` on the native binary:
+    an account's nick refused on create and on rename.
+
+### Decisions worth not relitigating
+
+- **Check first, then the index.** The query answers the normal case. Two
+  instances can still pass the check for the same key at once; the partial
+  unique index then refuses the second write. To answer that with 409 and
+  not a 500 at commit, `PATCH /players/me` and verify flush the change
+  inside the method (`Player.flushNickKey`), match the violation on the
+  index name, and mark the transaction rollback-only: the failed statement
+  has aborted it, and verify's `dontRollbackOn` would otherwise try to
+  commit it. In that race verify's code is therefore not used up, unlike
+  the other 409 (one-off, and only the code's holder gets there). Measured:
+  without the flush both race tests answer 500.
+- **A guest can still race an account for a key.** The index covers only
+  accounts, so a guest created or renamed in the same instant as an account
+  takes the key keeps it. It shows with the guest marker and can never
+  become an account under that key (the verify gets 409). Closing it would
+  need a lock across instances on every nick write; not worth it for a
+  marker.
+- **The merge locks the guest's row** the way a result submission does. A
+  submission already under way is moved with the rest; one that waits for
+  the lock finds its guest gone and fails with a 500 (reasoned, not
+  tested), as it would anyway once the verify has ended the device's
+  session.
+- **The merge moves every row, not only the best.** The boards pick each
+  player's best already, and nothing is lost if the account's best is later
+  beaten by the guest's.
+- **An account's code row is deleted before the player**, with a query
+  delete that runs at once (Panache's `deleteById` would only run at
+  commit; the SQL log shows the order). Verify locks the code row and then
+  the player; the other order could deadlock with a verify of the same
+  email.
+- **2 code-request slots per instance.** The lock timeout bounds each wait,
+  and so how long a flood keeps going once it stops; it does not bound how
+  many pooled connections the waiters hold (50 by default, with up to 80
+  requests in flight per instance). The slots do: at most 2 per instance, 6
+  across three instances. Code requests count one after another in the
+  database anyway, so a third waiting request gains nothing. Normal traffic
+  never sees them.
+- **The 10-parallel-requests test sends two codes first** and expects one
+  202 and nine 429s. With the slots, how many of a burst reach the database
+  depends on timing; with one code left to send the outcome does not, and
+  two requests in the database at once still show the table lock at work.
+- **`quarkus.mailer.login=REQUIRED`.** With the default (`NONE`) and no
+  key, the mailer skips the login and goes on to the mail commands (read
+  from the vertx-mail code, not tried against Resend). With `REQUIRED` it
+  stops after the greeting. The local SMTP stub in the tests now offers `AUTH PLAIN`, and
+  its resource sets a test key unless told not to.
+
 ## 2026-11-13 (fourth) - Email login with 6-digit codes
 
 A guest can verify an email address and so become an account that works on
@@ -18,9 +131,9 @@ proxy.
   used or no code), `429 too_many_attempts` on the fifth wrong attempt,
   which deletes the code, `409 nick_taken` when an account already holds
   the guest's nick key, `401 no_session` when there is no account and no
-  guest on this device. The guest merge is the accounts work's next step;
-  until then a guest on a device that logs into another account is left
-  alone.
+  guest on this device. Here a guest on a device that logs into another
+  account is left alone; the fifth entry merges a guest of the account's
+  kind (`"merged":true`).
 - `POST /logout` reads no body, deletes the session row, clears the cookie
   (`Max-Age=0`) and answers 204. `401 no_session` without a session.
 - Email: trimmed, lower case, at most 254 characters, one `@` with text on
@@ -37,7 +150,8 @@ proxy.
   day overall. All bounds sit in `Rules`. Every valid code request, a
   refused one too, first deletes send-log rows older than a day and expired
   codes. A code request that waits more than 2 s for its lock answers
-  `429 rate_limited` too.
+  `429 rate_limited` too, and so, since the fifth entry, does one that finds
+  no free request slot on its instance.
 - A failed send answers `500 internal_server_error` and logs one line with
   the root cause's class name and the SMTP reply code, never the exception
   or its text.
@@ -113,13 +227,15 @@ proxy.
   per-email row raced), and 10 parallel wrong guesses all got 400: the
   attempt counts overwrote each other, the fifth was never reached and the
   code survived. With them: three 202s and seven 429s, and exactly one 429
-  among the guesses. Without the row lock in the code request, a verify
+  among the guesses (the burst test now sends two codes first, see the
+  fifth entry). Without the row lock in the code request, a verify
   that deleted the row first made the request's update find nothing (500).
   Code requests are few, so a lock over all of them costs nothing.
 - **A 2 s lock timeout on code requests** (`set local lock_timeout`, so it
-  ends with the transaction, also on a pooled connection). Every waiter
-  holds a pooled connection, so an anonymous flood could otherwise use up
-  the pool and stall boards and results. A timed-out request answers
+  ends with the transaction, also on a pooled connection). It bounds each
+  wait, and so how long a flood keeps going once it stops; it does not
+  bound how many pooled connections the waiters hold. The request slots in
+  the fifth entry do that. A timed-out request answers
   `429 rate_limited`, also when the wait is for the code row; Hibernate
   still logs two warnings, the SQL state `55P03` and PostgreSQL's "canceling
   statement due to lock timeout", with no address.
@@ -181,7 +297,9 @@ proxy.
   on through a test resource (`MockMailer`) and reads the code from the mock
   mailbox's log line in `target/quarkus.log`. A missing `RESEND_SMTP_KEY`
   does not stop the service: the other native tests start the binary
-  without it. The deploy always sets it.
+  without it. The deploy always sets it. Since the fifth entry
+  (`quarkus.mailer.login=REQUIRED`), a send without it fails before any
+  address is sent.
 
 ## 2026-11-13 (later still) - Guest players, results and leaderboards for klad
 

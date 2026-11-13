@@ -102,6 +102,38 @@ class NicksTest {
         assertThat(key, equalTo("bob_7"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"Bob_7", "BOB_7", "bob_7", "  bOb_7 ", "\uFF22\uFF4F\uFF42_\uFF17"})
+    void shouldGiveOneKey_whenKey_givenCaseAndWidthVariantsOfLatinNick(String nick) {
+        // when
+        String key = Nicks.key(Nicks.normalize(nick));
+
+        // then
+        assertThat(key, equalTo("bob_7"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\u0401\u0436\u0438\u043A", "\u0401\u0416\u0418\u041A", "\u0451\u0436\u0438\u043A",
+            "\u0415\u0308\u0436\u0438\u043A"})
+    void shouldGiveOneKey_whenKey_givenCaseAndDecomposedVariantsOfCyrillicNick(String nick) {
+        // when
+        String key = Nicks.key(Nicks.normalize(nick));
+
+        // then
+        assertThat(key, equalTo("\u0451\u0436\u0438\u043A"));
+    }
+
+    // Latin B and b around a Cyrillic o, which looks like the Latin one.
+    @ParameterizedTest
+    @ValueSource(strings = {"B\u043Eb", "\uFF22\u043E\uFF42"})
+    void shouldReject_whenIsValid_givenLookalikeLetterOfOtherScriptAfterNormalize(String nick) {
+        // when
+        boolean isValid = Nicks.isValid(Nicks.normalize(nick));
+
+        // then
+        assertThat(isValid, equalTo(false));
+    }
+
     @Test
     void shouldLowerCaseCyrillic_whenKey() {
         // when

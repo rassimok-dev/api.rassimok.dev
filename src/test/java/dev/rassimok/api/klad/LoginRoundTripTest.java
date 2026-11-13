@@ -83,6 +83,36 @@ class LoginRoundTripTest {
                 .then().statusCode(200).body("email", equalTo(email));
     }
 
+    @Test
+    void shouldRefuseNickTaken_whenCreatePlayerAndRename_givenAccountHoldsNickKey()
+            throws IOException, InterruptedException {
+        // given
+        String holderToken = TestPlayers.createGuest("NativeHolder", Rules.KIND_HUMAN);
+        String email = TestPlayers.uniqueEmail("native-holder");
+        requestCode(email);
+        given().cookie(TestPlayers.COOKIE, holderToken).contentType(ContentType.JSON)
+                .body(Map.of("email", email, "code", sentCode(email)))
+                .when().post("/login/verify")
+                .then().statusCode(200).body("account", equalTo(true));
+        String guestToken = TestPlayers.createGuest("NativeGuest", Rules.KIND_AGENT);
+
+        // when
+        ValidatableResponse created = given().contentType(ContentType.JSON)
+                .body(Map.of("nick", "NATIVEHOLDER", "kind", Rules.KIND_AGENT))
+                .when().post("/players")
+                .then();
+        ValidatableResponse renamed = given().cookie(TestPlayers.COOKIE, guestToken).contentType(ContentType.JSON)
+                .body(Map.of("nick", "nativeholder"))
+                .when().patch("/players/me")
+                .then();
+
+        // then
+        created.statusCode(409).body("", equalTo(Map.of("error", ApiException.NICK_TAKEN)));
+        renamed.statusCode(409).body("", equalTo(Map.of("error", ApiException.NICK_TAKEN)));
+        given().cookie(TestPlayers.COOKIE, guestToken).when().get("/players/me")
+                .then().statusCode(200).body("nick", equalTo("NativeGuest"));
+    }
+
     protected String sentCode(String email) throws IOException, InterruptedException {
         MockMailbox mailbox = Arc.container().instance(MockMailbox.class).get();
         return codeIn(mailbox.getMailMessagesSentTo(email).getLast().getText());
