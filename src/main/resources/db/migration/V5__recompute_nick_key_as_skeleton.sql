@@ -3,5 +3,5 @@
 -- Nicks.LATIN_EQUIVALENTS.
 update player set nick_key = translate(
         nick_key,
-        U&'0\0430\0432\0433\0435\043A\043C\043D\043E\0440\0441\0442\0443\0445\0448\044C',
-        'oabrekmhopctyxwb');
+        U&'01i\0430\0431\0432\0433\0435\0437\043A\043C\043D\043E\0440\0441\0442\0443\0445\0448\044C',
+        'olla6bre3kmhopctyxwb');

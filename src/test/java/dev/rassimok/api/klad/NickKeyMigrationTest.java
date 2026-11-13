@@ -40,7 +40,8 @@ class NickKeyMigrationTest {
     void shouldSetSameKeyAsNicks_whenMigrate_givenOldKeyOfEveryNickCharacter() throws SQLException, IOException {
         // given
         List<String> nicks = List.of(everyNickCharacter(), "\u0412\u041E\u0412_35", "B0B_35",
-                "\u0401\u0436\u0438\u043A_35");
+                "\u0401\u0436\u0438\u043A_35", "PauI_35", "Bi11_35", "\u0412\u0417\u0410\u0420_35",
+                "\u0431\u043E\u0432_35");
         List<List<Object>> expected = new ArrayList<>();
         List<List<Object>> migrated = new ArrayList<>();
         try (Connection connection = dataSource.getConnection()) {

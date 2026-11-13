@@ -70,7 +70,7 @@ class PlayersResourceTest {
                 from session join player on player.id = session.player_id
                 where session.token_hash = ?
                 """, Sessions.hash(token));
-        assertThat(stored, equalTo(Arrays.<Object>asList("MiXeD", "mixed", Rules.KIND_AGENT, null, Sessions.hash(token))));
+        assertThat(stored, equalTo(Arrays.<Object>asList("MiXeD", "mlxed", Rules.KIND_AGENT, null, Sessions.hash(token))));
         assertThat(Sessions.hash(token), matchesPattern("[0-9a-f]{64}"));
         assertThat(TestSql.count(dataSource, "select count(*) from session where token_hash = ?", token),
                 equalTo(0L));
@@ -179,7 +179,7 @@ class PlayersResourceTest {
 
         // then
         assertThat(answers, equalTo(Collections.nCopies(variants.size(), "409 " + NICK_TAKEN_BODY + " null")));
-        assertThat(TestSql.count(dataSource, "select count(*) from player where nick_key = 'kept_nick'"),
+        assertThat(TestSql.count(dataSource, "select count(*) from player where nick_key = 'kept_nlck'"),
                 equalTo(1L));
     }
 
@@ -197,7 +197,7 @@ class PlayersResourceTest {
 
         // then
         response.statusCode(201).body("nick", equalTo("TWINGUEST"));
-        assertThat(TestSql.count(dataSource, "select count(*) from player where nick_key = 'twinguest'"),
+        assertThat(TestSql.count(dataSource, "select count(*) from player where nick_key = 'twlnguest'"),
                 equalTo(2L));
     }
 

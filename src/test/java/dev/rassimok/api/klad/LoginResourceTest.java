@@ -802,6 +802,74 @@ class LoginResourceTest {
         assertThat(codeRowsFor(email), equalTo(0L));
     }
 
+    // The guest is BOB_42 in Cyrillic capitals, the account the same in Latin letters.
+    @Test
+    void shouldRefuseNickTakenAndKeepGuest_whenVerify_givenAccountHoldsLookalikeOfGuestsNick() throws SQLException {
+        // given
+        String guestToken = TestPlayers.createGuest("\u0412\u041E\u0412_42", Rules.KIND_HUMAN);
+        createAccount("Bob_42", TestPlayers.uniqueEmail("bob-42"));
+        UUID guestId = playerId(guestToken);
+        List<Object> expectedGuest = TestSql.row(dataSource, PLAYER_ROW, guestId);
+        String email = TestPlayers.uniqueEmail("lookalike");
+        String code = requestCode(email);
+
+        // when
+        ValidatableResponse response = verify(guestToken, email, code);
+
+        // then
+        response.statusCode(409).body("error", equalTo(ApiException.NICK_TAKEN)).header("Set-Cookie", nullValue());
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, guestId), equalTo(expectedGuest));
+    }
+
+    // The key a revision before the lookalike map wrote: the nick only in lower case.
+    @Test
+    void shouldRefuseNickTakenAndKeepGuest_whenVerify_givenGuestKeyWithoutLookalikeMap() throws SQLException {
+        // given
+        String nick = "\u0412\u041E\u0412_43";
+        String guestToken = TestPlayers.createGuest(nick, Rules.KIND_HUMAN);
+        UUID guestId = playerId(guestToken);
+        TestSql.execute(dataSource, "update player set nick_key = ? where id = ?", nick.toLowerCase(Locale.ROOT),
+                guestId);
+        createAccount("Bob_43", TestPlayers.uniqueEmail("bob-43"));
+        List<Object> expectedGuest = TestSql.row(dataSource, PLAYER_ROW, guestId);
+        String email = TestPlayers.uniqueEmail("old-key");
+        String code = requestCode(email);
+
+        // when
+        ValidatableResponse response = verify(guestToken, email, code);
+
+        // then
+        response.statusCode(409).body("error", equalTo(ApiException.NICK_TAKEN)).header("Set-Cookie", nullValue());
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, guestId), equalTo(expectedGuest));
+    }
+
+    @Test
+    void shouldStoreKeyWithLookalikeMap_whenVerify_givenGuestKeyWithoutLookalikeMap() throws SQLException {
+        // given
+        String nick = "\u0412\u041E\u0412_44";
+        String guestToken = TestPlayers.createGuest(nick, Rules.KIND_HUMAN);
+        UUID guestId = playerId(guestToken);
+        TestSql.execute(dataSource, "update player set nick_key = ? where id = ?", nick.toLowerCase(Locale.ROOT),
+                guestId);
+        String player = """
+                select player.id, player.nick, player.nick_key, player.kind, player.email, player.created_at,
+                       now() - player.last_seen_at < interval '1 minute'
+                from player where id = ?
+                """;
+        String email = TestPlayers.uniqueEmail("new-key");
+        List<Object> expected = TestSql.row(dataSource, player, guestId);
+        expected.set(2, "bob_44");
+        expected.set(4, email);
+        String code = requestCode(email);
+
+        // when
+        ValidatableResponse response = verify(guestToken, email, code);
+
+        // then
+        response.statusCode(200).body("account", equalTo(true));
+        assertThat(TestSql.row(dataSource, player, guestId), equalTo(expected));
+    }
+
     // The other connection plays an instance that gives an account the
     // guest's nick key after this verify has checked it.
     @Test

@@ -6,6 +6,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.List;
+
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
@@ -13,11 +15,11 @@ import static org.hamcrest.Matchers.nullValue;
 class NicksTest {
 
     // Every other character a nick may hold, in lower case and as capitals.
-    private static final String NO_LOOKALIKES = "abcdefghijklmnopqrstuvwxyz123456789_-"
-            + "\u0431\u0434\u0436\u0437\u0438\u0439\u043B\u043F\u0444\u0446\u0447\u0449\u044A\u044B\u044D\u044E\u044F"
+    private static final String NO_LOOKALIKES = "abcdefghjklmnopqrstuvwxyz23456789_-"
+            + "\u0434\u0436\u0438\u0439\u043B\u043F\u0444\u0446\u0447\u0449\u044A\u044B\u044D\u044E\u044F"
             + "\u0451";
-    private static final String NO_LOOKALIKES_IN_CAPITALS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789_-"
-            + "\u0411\u0414\u0416\u0417\u0418\u0419\u041B\u041F\u0424\u0426\u0427\u0429\u042A\u042B\u042D\u042E\u042F"
+    private static final String NO_LOOKALIKES_IN_CAPITALS = "ABCDEFGHJKLMNOPQRSTUVWXYZ23456789_-"
+            + "\u0414\u0416\u0418\u0419\u041B\u041F\u0424\u0426\u0427\u0429\u042A\u042B\u042D\u042E\u042F"
             + "\u0401";
 
     @ParameterizedTest
@@ -152,7 +154,7 @@ class NicksTest {
         assertThat(key, equalTo("\u0451\u0436\u0438k"));
     }
 
-    // Each Cyrillic lookalike in both cases, then zero.
+    // Each Cyrillic lookalike in both cases, then zero, one and Latin i in both cases.
     @ParameterizedTest
     @CsvSource({
             "\u0410, a", "\u0430, a",
@@ -170,13 +172,45 @@ class NicksTest {
             "\u0425, x", "\u0445, x",
             "\u0428, w", "\u0448, w",
             "\u042C, b", "\u044C, b",
-            "0, o"})
+            "0, o",
+            "1, l",
+            "I, l", "i, l"})
     void shouldGiveLatinLetter_whenKey_givenLookalike(String lookalike, String latinLetter) {
         // when
         String key = Nicks.key(lookalike);
 
         // then
         assertThat(key, equalTo(latinLetter));
+    }
+
+    // Cyrillic Ze and Be in both cases.
+    @ParameterizedTest
+    @CsvSource({
+            "\u0417, 3", "\u0437, 3",
+            "\u0411, 6", "\u0431, 6"})
+    void shouldGiveDigit_whenKey_givenCyrillicLookalikeOfDigit(String lookalike, String digit) {
+        // when
+        String key = Nicks.key(lookalike);
+
+        // then
+        assertThat(key, equalTo(digit));
+    }
+
+    // Capital I for small l, the digit 1 for l, Cyrillic Ve, Ze, A, Er for
+    // B3AP, Cyrillic be, o, ve for 6ob; Bili shares the key of Bill too.
+    @ParameterizedTest
+    @CsvSource({
+            "Paul, PauI, paul",
+            "Bill, Bi11, blll",
+            "Bill, Bili, blll",
+            "B3AP, \u0412\u0417\u0410\u0420, b3ap",
+            "6ob, \u0431\u043E\u0432, 6ob"})
+    void shouldGiveOneKey_whenKey_givenLookalikePair(String nick, String lookalikeNick, String expectedKey) {
+        // when
+        List<String> keys = List.of(Nicks.key(nick), Nicks.key(lookalikeNick));
+
+        // then
+        assertThat(keys, equalTo(List.of(expectedKey, expectedKey)));
     }
 
     @ParameterizedTest
