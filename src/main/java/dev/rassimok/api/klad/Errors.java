@@ -40,11 +40,11 @@ public class Errors {
     }
 
     // Only methods that take a JsonNode body are checked: @Consumes alone lets a
-    // body with no content type, or application/octet-stream, reach the reader.
+    // body with no content type, */* or application/* reach the reader.
     // The others ignore any body; the proxy may forward an empty chunked one.
     @ServerRequestFilter
     public Optional<Response> refuseNonJsonBody(ContainerRequestContext request, SimpleResourceInfo resource) {
-        boolean isBodyEndpoint = Arrays.asList(resource.parameterTypes()).contains(JsonNode.class);
+        boolean isBodyEndpoint = Arrays.stream(resource.parameterTypes()).anyMatch(JsonNode.class::isAssignableFrom);
         boolean shouldRefuse = isBodyEndpoint && !isJson(parsedMediaType(request));
         Response.Status status = Response.Status.UNSUPPORTED_MEDIA_TYPE;
         return shouldRefuse ? Optional.of(response(status, codeFor(status))) : Optional.empty();

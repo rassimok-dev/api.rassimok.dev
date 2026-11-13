@@ -124,17 +124,23 @@ read the boards. The game calls these through the site's proxy at
   `POST /players`, `PATCH /players/me`, `POST /clears` and `POST /runs`
   answer 415 for any other type and for none, with or without a body.
   `@Consumes` alone lets a body with no `Content-Type`, or one sent as
-  `application/octet-stream`, through to the JSON reader (measured). A
+  `*/*`, `application/*` or `application/json; version=2`, through to the
+  JSON reader (measured); it does refuse `application/octet-stream`. A
   request filter therefore checks every resource method that takes a
-  `JsonNode` body. It compares type and subtype itself and allows only a
-  `charset` parameter: `MediaType.isCompatible` would let `*/*` and
-  `application/*` through, and `application/json; version=2` is not the
-  contract's type either. A type that does not parse at all (`garbage`)
-  gets 415 too: `@Consumes` matching answers it before the filter runs,
-  and the filter would treat it as not JSON. Found in review, the filter
-  used to read the type of every request with a body and threw on such a
-  type, answering 500 with an error stack in the log, from any anonymous
-  client.
+  `JsonNode` body (a subtype such as `ObjectNode` counts too). A body
+  endpoint must take one: the filter would skip a record, `Map` or
+  `String` body without a sign. `ResponseHeadersTest` lists every body
+  endpoint with a 415 row for no type and one for octet-stream, which
+  `ResponseHeadersIT` also runs on the binary; a new body endpoint adds
+  its two rows there. The filter compares type and subtype itself and
+  allows only a `charset` parameter: `MediaType.isCompatible` would let
+  `*/*` and `application/*` through, and `application/json; version=2` is
+  not the contract's type either. A type that does not parse at all
+  (`garbage`) gets 415 too: `@Consumes` matching answers it before the
+  filter runs, and the filter would treat it as not JSON. Found in review,
+  the filter used to read the type of every request with a body and threw
+  on such a type, answering 500 with an error stack in the log, from any
+  anonymous client.
 - **Endpoints that read no body ignore any body and its type** (every
   `GET`, `DELETE /players/me`). Found in the second review: the filter
   used to check every request that carried a body, and an empty chunked

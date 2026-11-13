@@ -64,6 +64,20 @@ class ResponseHeadersTest {
                 Arguments.of("GET", "/boards/level?level=x", null, null, 400, "invalid_query"));
     }
 
+    // Every endpoint that reads a JSON body belongs here. Routing already
+    // refuses octet-stream; only the filter refuses a body with no type.
+    static Stream<Arguments> bodiesWithoutJsonType() {
+        return Stream.of(
+                Arguments.of("POST", "/players", null, PLAYER_BODY),
+                Arguments.of("POST", "/players", "application/octet-stream", PLAYER_BODY),
+                Arguments.of("PATCH", "/players/me", null, "{\"nick\":\"Bob\"}"),
+                Arguments.of("PATCH", "/players/me", "application/octet-stream", "{\"nick\":\"Bob\"}"),
+                Arguments.of("POST", "/clears", null, "{\"level\":1}"),
+                Arguments.of("POST", "/clears", "application/octet-stream", "{\"level\":1}"),
+                Arguments.of("POST", "/runs", null, "{\"levelsCleared\":1}"),
+                Arguments.of("POST", "/runs", "application/octet-stream", "{\"levelsCleared\":1}"));
+    }
+
     // A valid player body, so only the size can refuse it. The input stream
     // has no known length, so it goes out chunked, as the proxy forwards it.
     static Stream<Arguments> bodiesOverLimit() {
@@ -171,6 +185,28 @@ class ResponseHeadersTest {
         HttpRequest request = HttpRequest.newBuilder(clearsUri)
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build();
+
+        // when
+        HttpResponse<String> response;
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+
+        // then
+        assertThat(response.statusCode(), equalTo(415));
+        assertThat(response.body(), equalTo("{\"error\":\"unsupported_media_type\"}"));
+    }
+
+    // Sent with the JDK client: RestAssured cannot send a body without a type.
+    @ParameterizedTest(name = "{0} {1} {2}")
+    @MethodSource("bodiesWithoutJsonType")
+    void shouldAnswerUnsupportedMediaType_whenRequest_givenBodyWithoutJsonContentType(String method, String path,
+                                                                                      String contentType, String body)
+            throws Exception {
+        // given
+        HttpRequest.Builder builder = HttpRequest.newBuilder(playersUri.resolve(path))
+                .method(method, HttpRequest.BodyPublishers.ofString(body));
+        HttpRequest request = null == contentType ? builder.build() : builder.header("Content-Type", contentType).build();
 
         // when
         HttpResponse<String> response;
