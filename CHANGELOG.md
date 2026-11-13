@@ -294,9 +294,11 @@ its removal; the PR that makes it obsolete lists it for deletion.
     it at once. Vert.x's own refusals after the lookup (400 for a
     `Connection` header without `upgrade`, or for a missing key) end their
     response before the upgrade fails, so a request queued behind one of
-    them gets no answer; no slot is lost (read in the source, not tested). Two upgrades in one write are not reachable through the site's
-    proxy, which opens one connection per upgrade; at the run.app URL it
-    depends on Google's front end (not tested).
+    them gets no answer; no slot is lost (measured on the native binary in
+    the sixth review: 400, then no answer, the cap whole). Two upgrades in
+    one write are not reachable through the site's proxy, which opens one
+    connection per upgrade; at the run.app URL it depends on Google's front
+    end (not tested).
   - Checked by mutation in the JVM tests. With the body refusal turned
     off, 40 chunked handshakes of 9,000 bytes got 413, and then 20 sockets
     opened at once; on the code before the backstop, the same left the
@@ -385,7 +387,23 @@ its removal; the PR that makes it obsolete lists it for deletion.
   handshake (499, never sent, because the client has gone) just before the
   upgrade, which logs nothing; its slot came back at the close. The
   handshake itself runs one event-loop task after `toWebSocket()`; a close
-  in that gap fails the upgrade.
+  in that gap fails the upgrade, and Vert.x 4.5 then logs one ERROR with a
+  stack trace ("Result is already complete", from its own
+  `createWebSocket`; about 3 in 100 handshakes abandoned in a concurrent
+  burst, measured in the sixth review). No slot is lost. The line comes
+  from inside Vert.x and cannot be removed from the endpoint; RAS-32 may
+  try a no-op exception handler after `toWebSocket()`.
+- **Session lookups in flight are not bounded by the cap.** A handshake
+  abandoned during its lookup gets its slot back when its connection
+  closes, while the lookup still runs. The sixth review flooded a 256 MiB
+  native instance with about 4,200 abandoned handshakes a second from a
+  raw client and killed it for lack of memory in about 15 s. The review
+  rated it minor: it is the same class as a flood of any REST request with a
+  cookie; at the run.app URL any client can send the expected `Origin`,
+  and through the site's proxy each attempt is a metered Workers request;
+  `--max-instances 3` bounds the cost.
+  RAS-32 may hold the slot until the lookup returns, which caps lookups at
+  20 at a time.
 - **The Cloud Run idle timeout was not measured.** That optional check needs a
   deploy. The race cap of 4 minutes keeps a socket inside the default
   5-minute request timeout, so `deploy.yml` is unchanged.
