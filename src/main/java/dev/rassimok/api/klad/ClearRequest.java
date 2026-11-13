@@ -7,10 +7,10 @@ record ClearRequest(Integer level, String shape, Integer revision, Integer ticks
 
     static ClearRequest from(JsonNode body) {
         return new ClearRequest(
-                JsonFields.integer(body, "level"),
-                JsonFields.text(body, "shape"),
+                JsonFields.integer(body, Rules.FIELD_LEVEL),
+                JsonFields.text(body, Rules.FIELD_SHAPE),
                 JsonFields.integer(body, "revision"),
-                JsonFields.integer(body, "ticks"),
+                JsonFields.integer(body, Rules.FIELD_TICKS),
                 JsonFields.integer(body, "chests"),
                 JsonFields.integer(body, "chestsTotal"));
     }
@@ -18,7 +18,7 @@ record ClearRequest(Integer level, String shape, Integer revision, Integer ticks
     boolean isValid() {
         return Rules.isBetween(level, Rules.LEVEL_MIN, Rules.LEVEL_MAX)
                 && Rules.isShape(shape)
-                && Rules.isBetween(revision, Rules.REVISION_MIN, Rules.REVISION_MAX)
+                && Rules.isCurrentRevision(level, revision)
                 && Rules.isBetween(ticks, Rules.TICKS_FLOOR, Rules.CLEAR_TICKS_MAX)
                 && Rules.isBetween(chestsTotal, Rules.CHESTS_TOTAL_MIN, Rules.CHESTS_TOTAL_MAX)
                 && Rules.isBetween(chests, 0, chestsTotal);

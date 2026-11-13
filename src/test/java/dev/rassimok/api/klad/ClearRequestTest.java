@@ -13,8 +13,8 @@ class ClearRequestTest {
     static Stream<ClearRequest> validClears() {
         return Stream.of(
                 new ClearRequest(1, Rules.SHAPE_LANDSCAPE, 1, 600, 0, 1),
-                new ClearRequest(5, Rules.SHAPE_PORTRAIT, 1000, 432_000, 100, 100),
-                new ClearRequest(3, Rules.SHAPE_PORTRAIT, 2, 1500, 4, 7));
+                new ClearRequest(5, Rules.SHAPE_PORTRAIT, 1, 432_000, 100, 100),
+                new ClearRequest(3, Rules.SHAPE_PORTRAIT, 1, 1500, 4, 7));
     }
 
     static Stream<ClearRequest> invalidClears() {
@@ -25,7 +25,8 @@ class ClearRequestTest {
                 new ClearRequest(1, "square", 1, 600, 0, 1),
                 new ClearRequest(1, null, 1, 600, 0, 1),
                 new ClearRequest(1, Rules.SHAPE_LANDSCAPE, 0, 600, 0, 1),
-                new ClearRequest(1, Rules.SHAPE_LANDSCAPE, 1001, 600, 0, 1),
+                new ClearRequest(1, Rules.SHAPE_LANDSCAPE, 2, 600, 0, 1),
+                new ClearRequest(5, Rules.SHAPE_PORTRAIT, 2, 600, 0, 1),
                 new ClearRequest(1, Rules.SHAPE_LANDSCAPE, null, 600, 0, 1),
                 new ClearRequest(1, Rules.SHAPE_LANDSCAPE, 1, 599, 0, 1),
                 new ClearRequest(1, Rules.SHAPE_LANDSCAPE, 1, 432_001, 0, 1),

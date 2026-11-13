@@ -28,7 +28,7 @@ import static org.hamcrest.Matchers.equalTo;
 class ResultsResourceTest {
 
     private static final Map<String, Object> CLEAR = Map.of("level", 2, "shape", Rules.SHAPE_PORTRAIT,
-            "revision", 3, "ticks", 1500, "chests", 4, "chestsTotal", 7);
+            "revision", 1, "ticks", 1500, "chests", 4, "chestsTotal", 7);
     private static final Map<String, Object> RUN = Map.of("levelsCleared", 2, "score", 4200, "ticks", 9000);
 
     @Inject
@@ -48,7 +48,7 @@ class ResultsResourceTest {
                 select level, shape, revision, ticks, chests, chests_total, now() - created_at < interval '1 minute'
                 from level_clear where player_id = ?
                 """, playerId(token));
-        assertThat(stored, equalTo(List.of(2, Rules.SHAPE_PORTRAIT, 3, 1500, 4, 7, true)));
+        assertThat(stored, equalTo(List.of(2, Rules.SHAPE_PORTRAIT, 1, 1500, 4, 7, true)));
     }
 
     @Test
@@ -88,7 +88,8 @@ class ResultsResourceTest {
     @ValueSource(strings = {
             "{\"level\":6,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
             "{\"level\":1,\"shape\":\"square\",\"revision\":1,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
-            "{\"level\":1,\"shape\":\"portrait\",\"revision\":1001,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+            "{\"level\":1,\"shape\":\"portrait\",\"revision\":2,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+            "{\"level\":1,\"shape\":\"portrait\",\"revision\":0,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
             "{\"level\":1,\"shape\":\"portrait\",\"revision\":1,\"ticks\":599,\"chests\":0,\"chestsTotal\":1}",
             "{\"level\":1,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900,\"chests\":3,\"chestsTotal\":2}",
             "{\"level\":1,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900,\"chestsTotal\":1}",

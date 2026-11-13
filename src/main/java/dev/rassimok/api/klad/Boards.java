@@ -8,6 +8,8 @@ import org.hibernate.query.NativeQuery;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /**
  * Top 20 per board, one entry per player (their best), ranked from 1. The
@@ -62,18 +64,16 @@ public class Boards {
             limit :size
             """;
 
-    // Only the newest revision of each level and shape that anyone cleared
-    // counts, so a changed layout resets its share of the total.
+    // Only clears at each level's current revision count, so a changed layout
+    // resets its share of the total.
     private static final String CHESTS = """
-            with newest as (
-                select level, shape, max(revision) as revision
-                from level_clear
-                group by level, shape
+            with current_revision (level, revision) as (
+                values %s
             ),
             best as (
                 select level_clear.player_id, max(level_clear.chests) as chests
                 from level_clear
-                join newest using (level, shape, revision)
+                join current_revision using (level, revision)
                 group by level_clear.player_id, level_clear.level, level_clear.shape
             )
             select player.nick, player.email is null, sum(best.chests) as total_chests
@@ -83,7 +83,7 @@ public class Boards {
             group by player.id
             order by total_chests desc, player.nick_key, player.id
             limit :size
-            """;
+            """.formatted(currentRevisionRows());
 
     @Inject
     Session hibernateSession;
@@ -120,7 +120,8 @@ public class Boards {
         return new RecordsBoard(entries);
     }
 
-    LevelBoard level(String kind, int level, String shape, int revision) {
+    LevelBoard level(String kind, int level, String shape) {
+        int revision = Rules.currentRevision(level);
         List<FastestEntry> fastest = new ArrayList<>();
         for (Object[] row : rows(levelQuery(FASTEST, kind, level, shape, revision))) {
             fastest.add(new FastestEntry(fastest.size() + 1, (String) row[0], (Boolean) row[1], number(row[2])));
@@ -139,6 +140,14 @@ public class Boards {
             entries.add(new ChestsEntry(entries.size() + 1, (String) row[0], (Boolean) row[1], number(row[2])));
         }
         return new ChestsBoard(entries);
+    }
+
+    // Rows such as (1, 1), (2, 1). They come from the constants in Rules, so
+    // no request value reaches the SQL text.
+    private static String currentRevisionRows() {
+        return IntStream.rangeClosed(Rules.LEVEL_MIN, Rules.LEVEL_MAX)
+                .mapToObj(level -> "(" + level + ", " + Rules.currentRevision(level) + ")")
+                .collect(Collectors.joining(", "));
     }
 
     private NativeQuery<Object[]> query(String sql, String kind) {

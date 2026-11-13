@@ -16,14 +16,15 @@ read the boards. The game calls these through the site's proxy at
   cascade`) and clears the cookie.
 - `POST /clears` (level, shape, revision, ticks, chests, chests total) and
   `POST /runs` (levels cleared, score, ticks) store results. Both answer
-  `201 {}`.
+  `201 {}`. A clear must carry its level's current revision.
 - `GET /boards/records`, `/boards/level` and `/boards/chests` return the top
   20, one entry per player, separately for each kind. `kind` defaults to
-  `human`.
+  `human`. `/boards/level` takes `level` and `shape` and always shows the
+  level's current revision; a `revision` parameter is ignored.
 - Migration `V2` adds `level_clear` and `game_run`, each with a
   `player_id` foreign key that cascades on delete. Each has an index on
   (player, time) for the rate limit; `level_clear` also has one on (level,
-  shape, revision) for the level boards. `V1` is unchanged.
+  shape, revision) for the level and chests boards. `V1` is unchanged.
 - Session cookie `klad_session`: 32 `SecureRandom` bytes, base64url.
   The database stores only the SHA-256 of the token, as lower-case hex. The
   cookie is sent as `Path=/klad/api; HttpOnly; Secure; SameSite=Strict;
@@ -35,9 +36,10 @@ read the boards. The game calls these through the site's proxy at
   U+0401 and U+0451 for Yo), never both in one nick, and digits, `_` and
   `-`. `nick_key` is the lower-case form. Accented Latin letters are
   refused: "Latin letter" is read as plain A to Z.
-- Every bound lives in one class, `Rules`. That covers the level and
-  revision ranges, the tick floor, the tick and score caps, the rate limit
-  and the board size.
+- Every bound lives in one class, `Rules`. That covers the level range and
+  each level's current revision, the tick floor, the tick and score caps,
+  the rate limit and the board size. The contract's field names used by
+  more than one class are constants there too.
 - Every response carries `Cache-Control: no-store`,
   `X-Content-Type-Options: nosniff` and `Content-Security-Policy:
   default-src 'none'; frame-ancestors 'none'`. That includes errors, the
@@ -52,10 +54,12 @@ read the boards. The game calls these through the site's proxy at
   that is not JSON at all, and `internal_server_error`, which is logged.
   The one exception is 413 for a body over 4 KB: it carries the three
   headers but no body.
-- Tests: unit tests for the nick, kind and result checks. `@QuarkusTest`
-  classes cover the cookie, the session refresh, every endpoint, ordering,
-  kinds apart, the rate limit (also 40 clears sent in parallel), delete, a
-  database failure, the body limit and the headers.
+- Tests: unit tests for the nick, kind, revision and result checks.
+  `@QuarkusTest` classes cover the cookie, the session refresh, every
+  endpoint, ordering, kinds apart, the rate limit (also 40 clears sent in
+  parallel), a forged revision, clears of another revision left in the
+  table, delete, a database failure, the content types, the body limit and
+  the headers.
   Two native tests run the same HTTP checks against the binary.
   `KladRoundTripIT` creates guests (NFKC and Cyrillic nicks), submits a
   clear and a run, reads all three boards, renames and deletes.
@@ -68,7 +72,8 @@ read the boards. The game calls these through the site's proxy at
 
 - **The rate limit is counted in the database.** Cloud Run may run up to
   three instances, so a counter in memory would allow three times the
-  limit. Each submission locks its player's row (`select ... for update`)
+  limit. Each submission locks its player's row (`PESSIMISTIC_WRITE`,
+  which Hibernate sends as `select ... for no key update` on Postgres)
   before counting the last 60 seconds of clears and runs. Parallel
   submissions by one player are therefore counted one after another, and
   the 31st is refused with 429. Only stored submissions count: a rejected
@@ -79,16 +84,26 @@ read the boards. The game calls these through the site's proxy at
   so it can move once real clear times are known. It is deliberately not a
   database check, so changing it needs no migration. Only the shape is
   checked in the database, like `kind` in `V1`.
-- **The chests board counts the newest revision that anyone cleared**, for
-  each level and shape, across both kinds. A changed layout resets its
-  share of everyone's total the moment the first clear of the new revision
-  arrives. A forged clear does more harm than a forged score: one clear
-  with any higher revision, from any guest, removes that level and shape
-  from every player's total on both kinds' boards. Ten such clears leave
-  only the forger on the board. It stays so until the forged rows are
-  deleted, by the forger's `DELETE /players/me` or by hand in the
-  database. The level boards are not affected, because the game asks for
-  its own revision.
+- **The API knows each level's current revision** (`Rules.LEVEL_REVISIONS`,
+  mirroring `klad/levels.js` in the site repository; every level is 1
+  today). `POST /clears` refuses any other revision with 400
+  `invalid_result`, and the level and chests boards count only clears at
+  the current revision. The first version accepted revisions 1 to 1000,
+  and the chests board counted the newest revision that anyone had
+  cleared. Found in review: one forged clear with a higher revision, from
+  any guest, removed that level and shape from every player's total on
+  both kinds' boards, and ten such clears left only the forger. It stayed
+  so until the rows were deleted by hand. A forged score only adds one
+  entry; this wiped everyone else's. This is plan 3.4's "known level and
+  revision" check. The other option was to let the game pass its
+  revisions to the boards, which needs no deploy order but still stores
+  whatever revision a client sends.
+- **A layout change needs the API first.** Bumping a revision in
+  `levels.js` means changing `Rules.LEVEL_REVISIONS` too, and the API must
+  deploy before the game: until then, clears of the new revision get 400
+  and are lost (the game ignores failed sends). Clears of the old revision
+  stay in the table and stop counting, so a changed layout starts its
+  boards empty.
 - **No CORS.** The game reaches the API through the same origin (the
   site's proxy), so no browser needs a cross-origin answer. Scripts and
   agents can call `api.rassimok.dev` directly, which is fine. A
@@ -106,7 +121,10 @@ read the boards. The game calls these through the site's proxy at
 - **A body must be sent as `application/json`.** `@Consumes` alone lets a
   body with no `Content-Type`, or one sent as `application/octet-stream`,
   through to the JSON reader (measured). A request filter answers 415 for
-  any body that is not JSON.
+  any other type. It compares type and subtype itself and allows only a
+  `charset` parameter: `MediaType.isCompatible` would let `*/*` and
+  `application/*` through, and `application/json; version=2` is not the
+  contract's type either.
 - **`nick_taken` is not checked yet.** Nicks may repeat until account nicks
   become unique in the accounts work, as the contract says.
 - **Request bodies are capped at 4 KB** (`quarkus.http.limits.max-body-size`).

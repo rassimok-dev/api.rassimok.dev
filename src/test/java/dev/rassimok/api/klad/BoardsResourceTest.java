@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
@@ -79,7 +80,7 @@ class BoardsResourceTest {
         String agent = TestPlayers.createGuest("Agent", Rules.KIND_AGENT);
         for (String token : List.of(human, agent)) {
             run(token, 1, 10, 700);
-            clear(token, 1, Rules.SHAPE_LANDSCAPE, 1, 700, 1, 1);
+            clear(token, 1, Rules.SHAPE_LANDSCAPE, 700, 1, 1);
         }
 
         // when
@@ -87,8 +88,7 @@ class BoardsResourceTest {
         ValidatableResponse humanChests = given().queryParam("kind", Rules.KIND_HUMAN).when().get("/boards/chests").then();
         ValidatableResponse agentRecords = given().queryParam("kind", Rules.KIND_AGENT).when().get("/boards/records").then();
         ValidatableResponse agentLevel = given().queryParam("kind", Rules.KIND_AGENT).queryParam("level", 1)
-                .queryParam("shape", Rules.SHAPE_LANDSCAPE).queryParam("revision", 1)
-                .when().get("/boards/level").then();
+                .queryParam("shape", Rules.SHAPE_LANDSCAPE).when().get("/boards/level").then();
 
         // then
         defaultRecords.body("entries.nick", contains("Human"));
@@ -103,16 +103,16 @@ class BoardsResourceTest {
         String first = TestPlayers.createGuest("First", Rules.KIND_HUMAN);
         String second = TestPlayers.createGuest("Second", Rules.KIND_HUMAN);
         String third = TestPlayers.createGuest("Third", Rules.KIND_HUMAN);
-        clear(first, 2, Rules.SHAPE_PORTRAIT, 5, 900, 2, 5);
-        clear(first, 2, Rules.SHAPE_PORTRAIT, 5, 800, 1, 5);
-        clear(second, 2, Rules.SHAPE_PORTRAIT, 5, 850, 5, 5);
-        clear(third, 2, Rules.SHAPE_PORTRAIT, 5, 800, 5, 5);
-        clear(third, 2, Rules.SHAPE_LANDSCAPE, 5, 600, 5, 5);
-        clear(third, 2, Rules.SHAPE_PORTRAIT, 4, 600, 5, 5);
+        clear(first, 2, Rules.SHAPE_PORTRAIT, 900, 2, 5);
+        clear(first, 2, Rules.SHAPE_PORTRAIT, 800, 1, 5);
+        clear(second, 2, Rules.SHAPE_PORTRAIT, 850, 5, 5);
+        clear(third, 2, Rules.SHAPE_PORTRAIT, 800, 5, 5);
+        clear(third, 2, Rules.SHAPE_LANDSCAPE, 600, 5, 5);
+        clear(third, 3, Rules.SHAPE_PORTRAIT, 600, 5, 5);
 
         // when
         ValidatableResponse response = given().queryParam("level", 2).queryParam("shape", Rules.SHAPE_PORTRAIT)
-                .queryParam("revision", 5).when().get("/boards/level").then();
+                .when().get("/boards/level").then();
 
         // then
         response.statusCode(200)
@@ -126,15 +126,15 @@ class BoardsResourceTest {
     }
 
     @Test
-    void shouldSumBestChestsOfNewestRevision_whenGetChests() {
+    void shouldSumBestChestsPerLevelAndShape_whenGetChests() {
         // given
         String veteran = TestPlayers.createGuest("Veteran", Rules.KIND_HUMAN);
         String newcomer = TestPlayers.createGuest("Newcomer", Rules.KIND_HUMAN);
-        clear(veteran, 1, Rules.SHAPE_LANDSCAPE, 1, 900, 5, 5);
-        clear(veteran, 2, Rules.SHAPE_LANDSCAPE, 1, 900, 2, 4);
-        clear(veteran, 2, Rules.SHAPE_LANDSCAPE, 1, 900, 3, 4);
-        clear(veteran, 2, Rules.SHAPE_PORTRAIT, 1, 900, 1, 4);
-        clear(newcomer, 1, Rules.SHAPE_LANDSCAPE, 2, 900, 1, 5);
+        clear(veteran, 1, Rules.SHAPE_LANDSCAPE, 900, 5, 5);
+        clear(veteran, 2, Rules.SHAPE_LANDSCAPE, 900, 2, 4);
+        clear(veteran, 2, Rules.SHAPE_LANDSCAPE, 900, 3, 4);
+        clear(veteran, 2, Rules.SHAPE_PORTRAIT, 900, 1, 4);
+        clear(newcomer, 1, Rules.SHAPE_LANDSCAPE, 900, 1, 5);
 
         // when
         ValidatableResponse response = given().when().get("/boards/chests").then();
@@ -142,31 +142,80 @@ class BoardsResourceTest {
         // then
         response.statusCode(200)
                 .body("entries", contains(
-                        Map.of("rank", 1, "nick", "Veteran", "guest", true, "chests", 4),
+                        Map.of("rank", 1, "nick", "Veteran", "guest", true, "chests", 9),
                         Map.of("rank", 2, "nick", "Newcomer", "guest", true, "chests", 1)));
     }
 
+    // Rows of another revision, as a layout change leaves them behind. The
+    // API refuses such clears, so they go straight into the table.
     @Test
-    void shouldDropOlderRevisionShare_whenGetChests_givenNewerRevisionClearedByOtherKind() {
+    void shouldCountOnlyCurrentRevision_whenGetBoards_givenClearsOfOtherRevisionStored() throws SQLException {
         // given
-        String human = TestPlayers.createGuest("Human", Rules.KIND_HUMAN);
-        clear(human, 1, Rules.SHAPE_LANDSCAPE, 1, 900, 5, 5);
-        clear(human, 2, Rules.SHAPE_LANDSCAPE, 1, 900, 3, 4);
-        clear(TestPlayers.createGuest("Agent", Rules.KIND_AGENT), 1, Rules.SHAPE_LANDSCAPE, 2, 900, 1, 5);
+        String current = TestPlayers.createGuest("Current", Rules.KIND_HUMAN);
+        String outdated = TestPlayers.createGuest("Outdated", Rules.KIND_HUMAN);
+        int otherRevision = Rules.currentRevision(1) + 1;
+        clear(current, 1, Rules.SHAPE_LANDSCAPE, 900, 3, 5);
+        insertClear(current, 1, Rules.SHAPE_LANDSCAPE, otherRevision, 600, 5, 5);
+        insertClear(outdated, 1, Rules.SHAPE_LANDSCAPE, otherRevision, 600, 5, 5);
 
         // when
-        ValidatableResponse response = given().when().get("/boards/chests").then();
+        ValidatableResponse level = given().queryParam("level", 1).queryParam("shape", Rules.SHAPE_LANDSCAPE)
+                .when().get("/boards/level").then();
+        ValidatableResponse chests = given().when().get("/boards/chests").then();
 
         // then
-        response.statusCode(200)
-                .body("entries", contains(Map.of("rank", 1, "nick", "Human", "guest", true, "chests", 3)));
+        level.statusCode(200)
+                .body("fastest", contains(Map.of("rank", 1, "nick", "Current", "guest", true, "ticks", 900)))
+                .body("chests", contains(Map.of("rank", 1, "nick", "Current", "guest", true,
+                        "chests", 3, "chestsTotal", 5, "ticks", 900)));
+        chests.statusCode(200)
+                .body("entries", contains(Map.of("rank", 1, "nick", "Current", "guest", true, "chests", 3)));
+    }
+
+    @Test
+    void shouldRefuseAndChangeNoBoard_whenSubmitClear_givenForgedRevision() throws SQLException {
+        // given
+        clear(TestPlayers.createGuest("Human", Rules.KIND_HUMAN), 1, Rules.SHAPE_LANDSCAPE, 900, 3, 5);
+        clear(TestPlayers.createGuest("Agent", Rules.KIND_AGENT), 1, Rules.SHAPE_LANDSCAPE, 900, 2, 5);
+        String forger = TestPlayers.createGuest("Forger", Rules.KIND_AGENT);
+
+        // when
+        ValidatableResponse response = given().cookie(TestPlayers.COOKIE, forger).contentType(ContentType.JSON)
+                .body(Map.of("level", 1, "shape", Rules.SHAPE_LANDSCAPE, "revision", Rules.currentRevision(1) + 1,
+                        "ticks", 600, "chests", 5, "chestsTotal", 5))
+                .when().post("/clears").then();
+
+        // then
+        response.statusCode(400).body("error", equalTo(ApiException.INVALID_RESULT));
+        assertThat(TestSql.count(dataSource, "select count(*) from level_clear"), equalTo(2L));
+        given().queryParam("kind", Rules.KIND_HUMAN).when().get("/boards/chests")
+                .then().body("entries", contains(Map.of("rank", 1, "nick", "Human", "guest", true, "chests", 3)));
+        given().queryParam("kind", Rules.KIND_AGENT).when().get("/boards/chests")
+                .then().body("entries", contains(Map.of("rank", 1, "nick", "Agent", "guest", true, "chests", 2)));
+        given().queryParam("kind", Rules.KIND_AGENT).queryParam("level", 1).queryParam("shape", Rules.SHAPE_LANDSCAPE)
+                .when().get("/boards/level")
+                .then().body("fastest.nick", contains("Agent")).body("chests.nick", contains("Agent"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "2", "0", "x"})
+    void shouldShowCurrentRevision_whenGetLevel_givenAnyRevisionParameter(String revision) {
+        // given
+        clear(TestPlayers.createGuest("Current", Rules.KIND_HUMAN), 4, Rules.SHAPE_PORTRAIT, 900, 1, 2);
+
+        // when
+        ValidatableResponse response = given().queryParam("level", 4).queryParam("shape", Rules.SHAPE_PORTRAIT)
+                .queryParam("revision", revision).when().get("/boards/level").then();
+
+        // then
+        response.statusCode(200).body("fastest.nick", contains("Current")).body("chests.nick", contains("Current"));
     }
 
     @Test
     void shouldBreakTiesByNickKey_whenGetChests() {
         // given
         for (String nick : List.of("carol", "Alice", "bob")) {
-            clear(TestPlayers.createGuest(nick, Rules.KIND_HUMAN), 1, Rules.SHAPE_PORTRAIT, 1, 900, 2, 2);
+            clear(TestPlayers.createGuest(nick, Rules.KIND_HUMAN), 1, Rules.SHAPE_PORTRAIT, 900, 2, 2);
         }
 
         // when
@@ -216,7 +265,7 @@ class BoardsResourceTest {
         // when
         ValidatableResponse records = given().when().get("/boards/records").then();
         ValidatableResponse level = given().queryParam("level", 1).queryParam("shape", Rules.SHAPE_PORTRAIT)
-                .queryParam("revision", 1).when().get("/boards/level").then();
+                .when().get("/boards/level").then();
         ValidatableResponse chests = given().when().get("/boards/chests").then();
 
         // then
@@ -248,7 +297,7 @@ class BoardsResourceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"/boards/records", "/boards/chests",
-            "/boards/level?level=1&shape=portrait&revision=1"})
+            "/boards/level?level=1&shape=portrait"})
     void shouldRejectKind_whenGetBoard_givenUnknownKind(String path) {
         // when
         ValidatableResponse response = given().queryParam("kind", "robot").when().get(path).then();
@@ -259,17 +308,14 @@ class BoardsResourceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
-            "shape=portrait&revision=1",
-            "level=0&shape=portrait&revision=1",
-            "level=6&shape=portrait&revision=1",
-            "level=one&shape=portrait&revision=1",
-            "level=1&revision=1",
-            "level=1&shape=square&revision=1",
-            "level=1&shape=portrait",
-            "level=1&shape=portrait&revision=0",
-            "level=1&shape=portrait&revision=1001",
-            "level=1&shape=portrait&revision=1.5",
-            "level=1&shape=portrait&revision=99999999999"})
+            "shape=portrait",
+            "level=0&shape=portrait",
+            "level=6&shape=portrait",
+            "level=one&shape=portrait",
+            "level=1.5&shape=portrait",
+            "level=99999999999&shape=portrait",
+            "level=1",
+            "level=1&shape=square"})
     void shouldRejectQuery_whenGetLevel_givenMissingOrInvalidKey(String query) {
         // when
         ValidatableResponse response = given().when().get("/boards/level?" + query).then();
@@ -285,12 +331,19 @@ class BoardsResourceTest {
                 .then().statusCode(201);
     }
 
-    private static void clear(String token, int level, String shape, int revision, int ticks, int chests,
-                              int chestsTotal) {
+    private static void clear(String token, int level, String shape, int ticks, int chests, int chestsTotal) {
         given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON)
-                .body(Map.of("level", level, "shape", shape, "revision", revision, "ticks", ticks,
+                .body(Map.of("level", level, "shape", shape, "revision", Rules.currentRevision(level), "ticks", ticks,
                         "chests", chests, "chestsTotal", chestsTotal))
                 .when().post("/clears")
                 .then().statusCode(201);
+    }
+
+    private void insertClear(String token, int level, String shape, int revision, int ticks, int chests,
+                             int chestsTotal) throws SQLException {
+        TestSql.execute(dataSource, """
+                insert into level_clear (player_id, level, shape, revision, ticks, chests, chests_total, created_at)
+                select player_id, ?, ?, ?, ?, ?, ?, now() from session where token_hash = ?
+                """, level, shape, revision, ticks, chests, chestsTotal, Sessions.hash(token));
     }
 }

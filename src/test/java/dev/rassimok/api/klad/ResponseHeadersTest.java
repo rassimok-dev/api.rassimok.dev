@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
 import java.net.URI;
@@ -30,6 +31,7 @@ import static org.hamcrest.Matchers.nullValue;
 class ResponseHeadersTest {
 
     private static final String CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'";
+    private static final String PLAYER_BODY = "{\"nick\":\"Bob\",\"kind\":\"human\"}";
 
     @TestHTTPResource("/clears")
     URI clearsUri;
@@ -46,6 +48,9 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/clears", "text/plain", "level=1", 415, "unsupported_media_type"),
                 Arguments.of("POST", "/clears", "application/octet-stream", "{\"level\":1}", 415, "unsupported_media_type"),
                 Arguments.of("PATCH", "/players/me", "application/octet-stream", "{\"nick\":\"Bob\"}", 415, "unsupported_media_type"),
+                Arguments.of("POST", "/players", "*/*", PLAYER_BODY, 415, "unsupported_media_type"),
+                Arguments.of("POST", "/players", "application/*", PLAYER_BODY, 415, "unsupported_media_type"),
+                Arguments.of("POST", "/players", "application/json; version=2", PLAYER_BODY, 415, "unsupported_media_type"),
                 Arguments.of("POST", "/players", "application/json", "{\"nick\":", 400, "bad_request"),
                 Arguments.of("POST", "/players", "application/json", "{\"nick\":\"Bob\",\"kind\":[1]}", 400, "invalid_kind"),
                 Arguments.of("POST", "/players", "application/json", "{\"nick\":12345,\"kind\":\"human\"}", 400, "invalid_nick"),
@@ -119,6 +124,26 @@ class ResponseHeadersTest {
         // then
         assertThat(response.statusCode(), equalTo(415));
         assertThat(response.body(), equalTo("{\"error\":\"unsupported_media_type\"}"));
+    }
+
+    // Sent with the JDK client, which adds no charset of its own.
+    @ParameterizedTest
+    @ValueSource(strings = {"application/json", "application/json; charset=utf-8", "Application/JSON;Charset=UTF-8"})
+    void shouldCreatePlayer_whenCreatePlayer_givenJsonContentType(String contentType) throws Exception {
+        // given
+        HttpRequest request = HttpRequest.newBuilder(playersUri)
+                .header("Content-Type", contentType)
+                .POST(HttpRequest.BodyPublishers.ofString(PLAYER_BODY))
+                .build();
+
+        // when
+        HttpResponse<String> response;
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+
+        // then
+        assertThat(response.statusCode(), equalTo(201));
     }
 
     @ParameterizedTest(name = "{0}")

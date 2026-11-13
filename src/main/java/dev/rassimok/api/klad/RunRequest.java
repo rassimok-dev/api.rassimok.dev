@@ -9,7 +9,7 @@ record RunRequest(Integer levelsCleared, Integer score, Integer ticks) {
         return new RunRequest(
                 JsonFields.integer(body, "levelsCleared"),
                 JsonFields.integer(body, "score"),
-                JsonFields.integer(body, "ticks"));
+                JsonFields.integer(body, Rules.FIELD_TICKS));
     }
 
     boolean isValid() {

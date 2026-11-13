@@ -16,12 +16,13 @@ import static org.hamcrest.Matchers.nullValue;
 
 /**
  * HTTP only, so the native integration test can run it against the binary.
- * Its own board key and the agent kind keep it apart from other tests' data.
+ * Its own level and shape and the agent kind keep it apart from other tests'
+ * data.
  */
 @QuarkusTest
 class KladRoundTripTest {
 
-    private static final int REVISION = 777;
+    private static final int LEVEL = 3;
     // Fullwidth letters, which NFKC turns into plain Latin.
     private static final String FULLWIDTH_NICK = "\uFF2E\uFF41\uFF54\uFF49\uFF56\uFF45";
     // E followed by a combining diaeresis, which NFKC composes into Yo.
@@ -65,7 +66,7 @@ class KladRoundTripTest {
         // given
         String token = TestPlayers.createGuest("RoundTrip", Rules.KIND_AGENT);
         given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON)
-                .body(Map.of("level", 3, "shape", Rules.SHAPE_LANDSCAPE, "revision", REVISION,
+                .body(Map.of("level", LEVEL, "shape", Rules.SHAPE_LANDSCAPE, "revision", Rules.currentRevision(LEVEL),
                         "ticks", 1200, "chests", 4, "chestsTotal", 6))
                 .when().post("/clears")
                 .then().statusCode(201).body("", equalTo(Map.of()));
@@ -76,8 +77,8 @@ class KladRoundTripTest {
 
         // when
         ValidatableResponse level = given()
-                .queryParam("kind", Rules.KIND_AGENT).queryParam("level", 3)
-                .queryParam("shape", Rules.SHAPE_LANDSCAPE).queryParam("revision", REVISION)
+                .queryParam("kind", Rules.KIND_AGENT).queryParam("level", LEVEL)
+                .queryParam("shape", Rules.SHAPE_LANDSCAPE)
                 .when().get("/boards/level")
                 .then();
         ValidatableResponse records = given().queryParam("kind", Rules.KIND_AGENT).when().get("/boards/records").then();

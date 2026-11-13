@@ -39,10 +39,18 @@ public class Errors {
     @ServerRequestFilter
     public Optional<Response> refuseNonJsonBody(ContainerRequestContext request) {
         boolean hasBody = 0 < request.getLength() || null != request.getHeaderString("Transfer-Encoding");
-        MediaType mediaType = request.getMediaType();
-        boolean isJson = null != mediaType && MediaType.APPLICATION_JSON_TYPE.isCompatible(mediaType);
+        boolean shouldRefuse = hasBody && !isJson(request.getMediaType());
         Response.Status status = Response.Status.UNSUPPORTED_MEDIA_TYPE;
-        return hasBody && !isJson ? Optional.of(response(status, codeFor(status))) : Optional.empty();
+        return shouldRefuse ? Optional.of(response(status, codeFor(status))) : Optional.empty();
+    }
+
+    // Only application/json with at most a charset. MediaType.isCompatible
+    // would also let */* and application/* through.
+    private static boolean isJson(MediaType mediaType) {
+        return null != mediaType
+                && MediaType.APPLICATION_JSON_TYPE.getType().equalsIgnoreCase(mediaType.getType())
+                && MediaType.APPLICATION_JSON_TYPE.getSubtype().equalsIgnoreCase(mediaType.getSubtype())
+                && mediaType.getParameters().keySet().stream().allMatch(MediaType.CHARSET_PARAMETER::equalsIgnoreCase);
     }
 
     @ServerExceptionMapper

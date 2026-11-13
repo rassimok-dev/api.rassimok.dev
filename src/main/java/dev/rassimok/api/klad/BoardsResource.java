@@ -23,26 +23,26 @@ public class BoardsResource {
 
     @GET
     @Path("/records")
-    public Boards.RecordsBoard records(@QueryParam("kind") String kind) {
+    public Boards.RecordsBoard records(@QueryParam(Rules.FIELD_KIND) String kind) {
         return boards.records(checkedKind(kind));
     }
 
     @GET
     @Path("/level")
-    public Boards.LevelBoard level(@QueryParam("kind") String kind, @QueryParam("level") String level,
-                                   @QueryParam("shape") String shape, @QueryParam("revision") String revision) {
+    public Boards.LevelBoard level(@QueryParam(Rules.FIELD_KIND) String kind,
+                                   @QueryParam(Rules.FIELD_LEVEL) String level,
+                                   @QueryParam(Rules.FIELD_SHAPE) String shape) {
         String checkedKind = checkedKind(kind);
         int levelNumber = checkedNumber(level, Rules.LEVEL_MIN, Rules.LEVEL_MAX);
-        int revisionNumber = checkedNumber(revision, Rules.REVISION_MIN, Rules.REVISION_MAX);
         if (!Rules.isShape(shape)) {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_QUERY);
         }
-        return boards.level(checkedKind, levelNumber, shape, revisionNumber);
+        return boards.level(checkedKind, levelNumber, shape);
     }
 
     @GET
     @Path("/chests")
-    public Boards.ChestsBoard chests(@QueryParam("kind") String kind) {
+    public Boards.ChestsBoard chests(@QueryParam(Rules.FIELD_KIND) String kind) {
         return boards.chests(checkedKind(kind));
     }
 

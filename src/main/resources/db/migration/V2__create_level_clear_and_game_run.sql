@@ -11,7 +11,7 @@ create table level_clear (
 );
 
 -- The rate limit counts a player's recent clears. The level boards and the
--- newest revision per level and shape look up by level, shape and revision.
+-- chests board look up clears by level, shape and revision.
 create index level_clear_player_id_created_at_idx on level_clear (player_id, created_at);
 create index level_clear_level_shape_revision_idx on level_clear (level, shape, revision);
 

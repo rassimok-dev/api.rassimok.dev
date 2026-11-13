@@ -24,7 +24,6 @@ import java.util.UUID;
 public class PlayersResource {
 
     private static final String FIELD_NICK = "nick";
-    private static final String FIELD_KIND = "kind";
 
     @Inject
     Sessions sessions;
@@ -34,7 +33,7 @@ public class PlayersResource {
     @Transactional
     public RestResponse<PlayerView> create(JsonNode body, @CookieParam(Sessions.COOKIE) String token) {
         String nick = Nicks.normalize(JsonFields.text(body, FIELD_NICK));
-        String kind = JsonFields.text(body, FIELD_KIND);
+        String kind = JsonFields.text(body, Rules.FIELD_KIND);
         if (!Nicks.isValid(nick)) {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_NICK);
         }
@@ -73,7 +72,7 @@ public class PlayersResource {
     @Transactional
     public RestResponse<PlayerView> rename(JsonNode body, @CookieParam(Sessions.COOKIE) String token) {
         Sessions.SignedIn signedIn = sessions.require(token);
-        if (JsonFields.hasField(body, FIELD_KIND)) {
+        if (JsonFields.hasField(body, Rules.FIELD_KIND)) {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.KIND_FIXED);
         }
         String nick = Nicks.normalize(JsonFields.text(body, FIELD_NICK));

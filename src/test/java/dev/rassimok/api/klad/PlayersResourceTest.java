@@ -234,6 +234,14 @@ class PlayersResourceTest {
     void shouldChangeOnlyNick_whenRename() throws SQLException {
         // given
         String token = TestPlayers.createGuest("OldName", Rules.KIND_AGENT);
+        String playerAndSession = """
+                select player.nick, player.nick_key, player.id, player.kind, player.email, player.created_at,
+                       player.last_seen_at, session.created_at, session.expires_at
+                from session join player on player.id = session.player_id where session.token_hash = ?
+                """;
+        List<Object> expected = TestSql.row(dataSource, playerAndSession, Sessions.hash(token));
+        expected.set(0, "NewName");
+        expected.set(1, "newname");
 
         // when
         ExtractableResponse<Response> response = given()
@@ -246,11 +254,7 @@ class PlayersResourceTest {
         // then
         assertThat(response.statusCode(), equalTo(200));
         assertThat(response.as(PlayerView.class), equalTo(new PlayerView("NewName", Rules.KIND_AGENT, false, null)));
-        List<Object> stored = TestSql.row(dataSource, """
-                select player.nick, player.nick_key, player.kind from session
-                join player on player.id = session.player_id where session.token_hash = ?
-                """, Sessions.hash(token));
-        assertThat(stored, equalTo(List.of("NewName", "newname", Rules.KIND_AGENT)));
+        assertThat(TestSql.row(dataSource, playerAndSession, Sessions.hash(token)), equalTo(expected));
     }
 
     @ParameterizedTest
