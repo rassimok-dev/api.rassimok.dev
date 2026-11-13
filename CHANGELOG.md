@@ -3,7 +3,7 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
-## 2026-11-13 - PostgreSQL wired, first migration, native tests and smoke test in the deploy
+## 2026-11-13 (later) - PostgreSQL wired, first migration, native tests and smoke test in the deploy
 
 The klad leaderboard needs players and sessions, so the datasource that was
 deliberately left unwired on 2026-09-16 is wired now. The database is
@@ -65,6 +65,12 @@ PostgreSQL 18 on Neon's free plan.
   the same entry.
 - **The secret must hold Neon's direct (non-pooled) URL.** Flyway migrates
   on every start, and the code does not work around the pooler.
+- **Readiness keeps Quarkus' built-in database check.** When that check
+  fails, the readiness body at `api.rassimok.dev/q/health/ready` carries the
+  JDBC driver's error message. The site's proxy refuses `/klad/api/q/*`, so
+  the message never appears on rassimok.dev. What it contains was not
+  observed. A custom check without the message would be more code for text
+  that appears only during an outage, so none was written.
 
 ## 2026-11-13 - Agent instructions moved out of the repository
 
