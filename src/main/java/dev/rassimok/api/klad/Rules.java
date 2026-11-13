@@ -58,6 +58,17 @@ final class Rules {
     static final int SOCKETS_OPEN_MAX = 20;
     static final int SOCKET_UNFINISHED_SENDS_MAX = 8;
 
+    // Presence and rooms live in the memory of the one instance; the caps
+    // bound how much of its 256 MB they can take.
+    static final Duration PRESENCE_WINDOW = Duration.ofSeconds(60);
+    static final int PRESENCE_MAX = 1_000;
+    static final int ROOMS_MAX = 100;
+    static final int ROOM_SIZE = 4;
+    static final int ROOM_PLAYERS_TO_START = 2;
+    static final int ROOM_ID_LENGTH = 10;
+    static final Duration LOBBY_MEMBER_SILENCE = Duration.ofSeconds(60);
+    static final Duration EMPTY_ROOM_LIFETIME = Duration.ofMinutes(10);
+
     private Rules() {
     }
 

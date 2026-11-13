@@ -1,5 +1,8 @@
 package dev.rassimok.api.klad;
 
+import io.quarkus.test.common.DevServicesContext;
+import org.postgresql.ds.PGSimpleDataSource;
+
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -7,12 +10,24 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 final class TestSql {
 
     private static final int LOCK_POLLS = 100;
 
     private TestSql() {
+    }
+
+    // Plain JDBC on the Dev Services database, so a test can also run against
+    // the native binary, where nothing can be injected.
+    static DataSource devServicesDatabase(DevServicesContext devServices) {
+        Map<String, String> properties = devServices.devServicesProperties();
+        PGSimpleDataSource dataSource = new PGSimpleDataSource();
+        dataSource.setURL(properties.get("quarkus.datasource.jdbc.url"));
+        dataSource.setUser(properties.get("quarkus.datasource.username"));
+        dataSource.setPassword(properties.get("quarkus.datasource.password"));
+        return dataSource;
     }
 
     static void execute(DataSource dataSource, String sql, Object... parameters) throws SQLException {

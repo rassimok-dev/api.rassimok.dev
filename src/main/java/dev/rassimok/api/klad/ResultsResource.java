@@ -72,9 +72,10 @@ public class ResultsResource {
         return Sessions.withRefreshedCookie(RestResponse.ResponseBuilder.create(RestResponse.Status.CREATED, Map.of()), signedIn);
     }
 
-    // Counted in the database because up to three instances serve requests.
-    // Locking the player row makes one player's parallel submissions count
-    // one after another, so a burst cannot slip past the limit.
+    // Counted in the database, which outlives a restart and is shared with the
+    // new revision's instance while a deploy rolls out. Locking the player
+    // row makes one player's parallel submissions count one after another,
+    // so a burst cannot slip past the limit.
     private static void checkRateLimit(Player player, Instant now) {
         Player.getEntityManager().lock(player, LockModeType.PESSIMISTIC_WRITE);
         Instant windowStart = now.minus(Rules.SUBMISSION_WINDOW);

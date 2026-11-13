@@ -36,6 +36,8 @@ class ResponseHeadersTest {
     // mock mailbox, so they must never send a mail.
     private static final String CODE_BODY = "{\"email\":\"nobody\"}";
     private static final String VERIFY_BODY = "{\"email\":\"nobody@example.com\",\"code\":\"123456\"}";
+    private static final String READY_BODY = "{\"ready\":true}";
+    private static final String LEVEL_BODY = "{\"level\":2,\"shape\":\"portrait\"}";
 
     @TestHTTPResource("/clears")
     URI clearsUri;
@@ -71,7 +73,13 @@ class ResponseHeadersTest {
                 Arguments.of("GET", "/boards/level?level=x", null, null, 400, "invalid_query"),
                 Arguments.of("POST", "/login/code", "application/json", CODE_BODY, 400, "invalid_email"),
                 Arguments.of("POST", "/login/verify", "application/json", VERIFY_BODY, 400, "invalid_code"),
-                Arguments.of("POST", "/logout", null, null, 401, "no_session"));
+                Arguments.of("POST", "/logout", null, null, 401, "no_session"),
+                Arguments.of("POST", "/presence", null, null, 401, "no_session"),
+                Arguments.of("GET", "/rooms/AAAAAAAAAA", null, null, 401, "no_session"),
+                Arguments.of("GET", "/rooms", null, null, 405, "method_not_allowed"),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", "text/plain", "ready", 415, "unsupported_media_type"),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/level", "application/*", "{\"level\":1}", 415, "unsupported_media_type"),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", "application/json", "{\"ready\":", 400, "bad_request"));
     }
 
     // Every endpoint that reads a JSON body belongs here. Routing already
@@ -89,7 +97,11 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/login/code", null, CODE_BODY),
                 Arguments.of("POST", "/login/code", "application/octet-stream", CODE_BODY),
                 Arguments.of("POST", "/login/verify", null, VERIFY_BODY),
-                Arguments.of("POST", "/login/verify", "application/octet-stream", VERIFY_BODY));
+                Arguments.of("POST", "/login/verify", "application/octet-stream", VERIFY_BODY),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", null, READY_BODY),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", "application/octet-stream", READY_BODY),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/level", null, LEVEL_BODY),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/level", "application/octet-stream", LEVEL_BODY));
     }
 
     // A valid player body, so only the size can refuse it. The input stream

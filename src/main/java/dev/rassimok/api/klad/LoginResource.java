@@ -40,6 +40,12 @@ public class LoginResource {
     @Inject
     Mailer mailer;
 
+    @Inject
+    PresenceStore presence;
+
+    @Inject
+    RoomStore rooms;
+
     // The same answer whether or not the email has an account, so nobody
     // can find out who plays here. The mail goes out after the code is
     // stored, so no database lock is held while the mail server answers.
@@ -103,6 +109,8 @@ public class LoginResource {
                 && player.kind.equals(devicePlayer.kind);
         if (isGuestOfSameKind) {
             mergeGuest(devicePlayer, player);
+            presence.forget(devicePlayer.id);
+            rooms.forget(devicePlayer.id);
         }
         player.lastSeenAt = now;
         String newToken = sessions.create(player, now);
@@ -115,8 +123,10 @@ public class LoginResource {
     @Path("logout")
     @Transactional
     public RestResponse<Void> logout(@CookieParam(Sessions.COOKIE) String token) {
-        sessions.require(token);
+        Player player = sessions.require(token).player();
         PlayerSession.deleteById(Sessions.hash(token));
+        presence.forget(player.id);
+        rooms.forget(player.id);
         return RestResponse.ResponseBuilder.<Void>create(RestResponse.Status.NO_CONTENT)
                 .header(HttpHeaders.SET_COOKIE, Sessions.clearedCookie())
                 .build();

@@ -28,6 +28,12 @@ public class PlayersResource {
     @Inject
     Sessions sessions;
 
+    @Inject
+    PresenceStore presence;
+
+    @Inject
+    RoomStore rooms;
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Transactional
@@ -105,6 +111,8 @@ public class PlayersResource {
         }
         // The player's sessions and results go with it: on delete cascade.
         Player.delete("id", player.id);
+        presence.forget(player.id);
+        rooms.forget(player.id);
         return RestResponse.ResponseBuilder.<Void>create(RestResponse.Status.NO_CONTENT)
                 .header(HttpHeaders.SET_COOKIE, Sessions.clearedCookie())
                 .build();
