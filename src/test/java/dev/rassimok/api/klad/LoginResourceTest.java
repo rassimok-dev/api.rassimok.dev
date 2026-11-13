@@ -16,6 +16,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.sql.DataSource;
+import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -48,6 +49,7 @@ class LoginResourceTest {
             + "Secure; SameSite=Strict; Max-Age=7776000";
     private static final String CLEARED_COOKIE = "klad_session=; Path=/klad/api; HttpOnly; Secure; "
             + "SameSite=Strict; Max-Age=0";
+    private static final int LOCK_POLLS = 100;
     private static final String LOGIN_CODE_ROW = """
             select email_hash, code_hash, attempts, expires_at, created_at from login_code where email_hash = ?
             """;
@@ -321,6 +323,57 @@ class LoginResourceTest {
         assertThat(statusCounts, equalTo(Map.of(202, 3L, 429, 7L)));
         assertThat(mailbox.getMailMessagesSentTo(email).size(), equalTo(3));
         assertThat(TestSql.count(dataSource, "select count(*) from login_mail"), equalTo(3L));
+    }
+
+    @Test
+    void shouldRefuseAndRecover_whenRequestCode_givenCodeRequestsLockedPastTimeout() throws SQLException {
+        // given
+        String email = TestPlayers.uniqueEmail("queued");
+
+        // when
+        ValidatableResponse response;
+        try (Connection otherRequest = dataSource.getConnection()) {
+            otherRequest.setAutoCommit(false);
+            TestSql.execute(otherRequest, "lock table login_mail in exclusive mode");
+            response = postCode(email);
+            otherRequest.rollback();
+        }
+
+        // then
+        response.statusCode(429).body("error", equalTo(ApiException.RATE_LIMITED));
+        assertThat(mailbox.getMailMessagesSentTo(email).size(), equalTo(0));
+        postCode(email).statusCode(202);
+    }
+
+    // The test's connection does what a verify does: lock the code row, then
+    // delete it (a right code or the fifth wrong one) while the request waits.
+    @Test
+    void shouldStoreNewCode_whenRequestCode_givenVerifyDeletesCodeMeanwhile() throws Exception {
+        // given
+        String email = TestPlayers.uniqueEmail("overtaken");
+        requestCode(email);
+        String emailHash = Sessions.hash(email);
+
+        // when
+        long lockWaiters;
+        int status;
+        try (ExecutorService executor = Executors.newSingleThreadExecutor();
+             Connection verifier = dataSource.getConnection()) {
+            verifier.setAutoCommit(false);
+            TestSql.execute(verifier, "select 1 from login_code where email_hash = ? for update", emailHash);
+            Future<Integer> request = executor.submit(() -> postCode(email).extract().statusCode());
+            lockWaiters = awaitLockWaiter();
+            TestSql.execute(verifier, "delete from login_code where email_hash = ?", emailHash);
+            verifier.commit();
+            status = request.get();
+        }
+
+        // then
+        assertThat(lockWaiters, equalTo(1L));
+        assertThat(status, equalTo(202));
+        List<Object> stored = TestSql.row(dataSource,
+                "select code_hash, attempts from login_code where email_hash = ?", emailHash);
+        assertThat(stored, equalTo(List.of(LoginCodes.hash(email, sentCode(email)), 0)));
     }
 
     @Test
@@ -746,6 +799,19 @@ class LoginResourceTest {
         Matcher matcher = Pattern.compile(COOKIE_PATTERN).matcher(cookie);
         assertThat(matcher.matches(), equalTo(true));
         return matcher.group(1);
+    }
+
+    private long awaitLockWaiter() throws SQLException, InterruptedException {
+        long waiters = lockWaiters();
+        for (int attempt = 1; 0 == waiters && LOCK_POLLS > attempt; attempt++) {
+            Thread.sleep(100);
+            waiters = lockWaiters();
+        }
+        return waiters;
+    }
+
+    private long lockWaiters() throws SQLException {
+        return TestSql.count(dataSource, "select count(*) from pg_stat_activity where wait_event_type = 'Lock'");
     }
 
     private static Map<Integer, Long> inParallel(List<Callable<Integer>> requests) throws InterruptedException {

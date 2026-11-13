@@ -14,8 +14,13 @@ final class TestSql {
     }
 
     static void execute(DataSource dataSource, String sql, Object... parameters) throws SQLException {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = prepare(connection, sql, parameters)) {
+        try (Connection connection = dataSource.getConnection()) {
+            execute(connection, sql, parameters);
+        }
+    }
+
+    static void execute(Connection connection, String sql, Object... parameters) throws SQLException {
+        try (PreparedStatement statement = prepare(connection, sql, parameters)) {
             statement.execute();
         }
     }

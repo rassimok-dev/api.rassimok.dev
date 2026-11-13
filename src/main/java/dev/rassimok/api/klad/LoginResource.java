@@ -2,7 +2,9 @@ package dev.rassimok.api.klad;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.mailer.Mailer;
+import io.vertx.ext.mail.SMTPException;
 import jakarta.inject.Inject;
+import jakarta.persistence.PessimisticLockException;
 import jakarta.transaction.Transactional;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.CookieParam;
@@ -12,6 +14,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.RestResponse;
 
 import java.time.Instant;
@@ -21,6 +24,7 @@ import java.util.Map;
 @Produces(MediaType.APPLICATION_JSON)
 public class LoginResource {
 
+    private static final Logger LOG = Logger.getLogger(LoginResource.class);
     private static final String FIELD_EMAIL = "email";
     private static final String FIELD_CODE = "code";
 
@@ -44,8 +48,24 @@ public class LoginResource {
         if (!Emails.isValid(email)) {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_EMAIL);
         }
-        String code = loginCodes.issue(email, Instant.now());
-        mailer.send(LoginCodes.mail(email, code));
+        String code;
+        try {
+            code = loginCodes.issue(email, Instant.now());
+        } catch (PessimisticLockException e) {
+            // Code requests wait at most 2 s for their lock; in a flood, try later.
+            throw new ApiException(Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
+        }
+        try {
+            mailer.send(LoginCodes.mail(email, code));
+        } catch (RuntimeException e) {
+            // The mail server's reply often repeats the address, so neither the
+            // exception nor its message may reach the log.
+            Throwable rootCause = rootCause(e);
+            int replyCode = rootCause instanceof SMTPException smtpException ? smtpException.getReplyCode() : 0;
+            LOG.errorf("Login code mail not sent: %s, reply %d", rootCause.getClass().getName(), replyCode);
+            Response.Status status = Response.Status.INTERNAL_SERVER_ERROR;
+            throw new ApiException(status, Errors.codeFor(status));
+        }
         return RestResponse.ResponseBuilder.create(RestResponse.Status.ACCEPTED, Map.<String, Object>of()).build();
     }
 
@@ -86,6 +106,14 @@ public class LoginResource {
         return RestResponse.ResponseBuilder.<Void>create(RestResponse.Status.NO_CONTENT)
                 .header(HttpHeaders.SET_COOKIE, Sessions.clearedCookie())
                 .build();
+    }
+
+    private static Throwable rootCause(Throwable throwable) {
+        Throwable root = throwable;
+        while (null != root.getCause() && root != root.getCause()) {
+            root = root.getCause();
+        }
+        return root;
     }
 
     private static Player turnGuestIntoAccount(Player devicePlayer, String email) {

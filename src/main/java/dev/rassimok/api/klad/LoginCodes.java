@@ -2,6 +2,7 @@ package dev.rassimok.api.klad;
 
 import io.quarkus.mailer.Mail;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.transaction.Transactional;
 import jakarta.ws.rs.core.Response;
@@ -29,13 +30,15 @@ public class LoginCodes {
     // starts and not when the native image is built.
     private final SecureRandom random = new SecureRandom();
 
-    // Up to three instances serve requests. The table lock makes code
-    // requests count one after another, so a burst cannot slip past the
-    // limits, and the per-email replace never races. Old rows are deleted on
-    // every request; dontRollbackOn keeps that when the answer is 429.
+    // The table lock makes code requests from every instance count one after
+    // another, so a burst cannot slip past the limits. Old rows go on every
+    // request; dontRollbackOn keeps that when the answer is 429.
     @Transactional(dontRollbackOn = ApiException.class)
     String issue(String email, Instant now) {
-        LoginMail.getEntityManager().createNativeQuery("lock table login_mail in exclusive mode").executeUpdate();
+        EntityManager entityManager = LoginMail.getEntityManager();
+        // Each waiter holds a pooled connection, so in a flood they give up early.
+        entityManager.createNativeQuery("set local lock_timeout = '2s'").executeUpdate();
+        entityManager.createNativeQuery("lock table login_mail in exclusive mode").executeUpdate();
         Instant dayAgo = now.minus(Rules.MAILS_PER_DAY_WINDOW);
         LoginMail.delete("sentAt <= ?1", dayAgo);
         LoginCode.delete("expiresAt <= ?1", now);
@@ -44,7 +47,8 @@ public class LoginCodes {
             throw new ApiException(Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
         }
         String code = newCode();
-        LoginCode loginCode = LoginCode.findById(emailHash);
+        // Waits for a verify that holds the row; if that verify deleted it, this inserts.
+        LoginCode loginCode = LoginCode.findById(emailHash, LockModeType.PESSIMISTIC_WRITE);
         if (null == loginCode) {
             loginCode = new LoginCode();
             loginCode.emailHash = emailHash;

@@ -36,7 +36,11 @@ proxy.
 - Limits, counted in the database: 3 codes per email per hour, 80 mails a
   day overall. All bounds sit in `Rules`. Every valid code request, a
   refused one too, first deletes send-log rows older than a day and expired
-  codes.
+  codes. A code request that waits more than 2 s for its lock answers
+  `429 rate_limited` too.
+- A failed send answers `500 internal_server_error` and logs one line with
+  the root cause's class name and the SMTP reply code, never the exception
+  or its text.
 - No table holds the address for a code request. `login_code` is keyed by
   the SHA-256 of the normalised email (lower-case hex) and the send log
   keeps the same hash; the address is stored only in `player.email`, when a
@@ -67,8 +71,14 @@ proxy.
   and their windows, old rows deleted on a refused request, 10 parallel
   code requests, a guest becoming an account, a second device, an account
   with a guest on the device, `nick_taken`, `no_session`, and logout; verify
-  and logout send no mail. `DatabaseMigrationTest` pins the `login_code`
-  columns and its `email_hash` key.
+  and logout send no mail. It also covers a code request while a verify
+  holds and then deletes the code row (202 and a new code), and one that
+  waits past the lock timeout (429, and the next request works).
+  `LoginMailFailureTest` sends through a local SMTP stub that refuses the
+  recipient and repeats the address in its reply: 500, one log line from
+  `LoginResource`, no logged throwable, the address in no log record.
+  `DatabaseMigrationTest` pins the `login_code` columns and its
+  `email_hash` key.
   `ResponseHeadersTest` has the 415 rows for both login bodies, the error
   rows, and logout with an empty chunked body and no type (204, no
   `Content-Type`). `LoginRoundTripIT` requests and verifies codes against
@@ -97,17 +107,35 @@ proxy.
   attempts would never add up.
 - **Locks, because up to three instances serve requests.** A code request
   takes `lock table login_mail in exclusive mode` before counting, so
-  requests count one after another; verify locks the email's code row.
-  Measured without them: 10 parallel requests for one email gave one 202
-  and nine 500s (the per-email row raced), and 10 parallel wrong guesses
-  all got 400: the attempt counts overwrote each other, the fifth was never
-  reached and the code survived. With them: three 202s and seven 429s, and
-  exactly one 429 among the guesses. Code requests are few, so a lock over
-  all of them costs nothing.
+  requests count one after another; verify locks the email's code row, and
+  so does the code request before it replaces the code. Measured without
+  them: 10 parallel requests for one email gave one 202 and nine 500s (the
+  per-email row raced), and 10 parallel wrong guesses all got 400: the
+  attempt counts overwrote each other, the fifth was never reached and the
+  code survived. With them: three 202s and seven 429s, and exactly one 429
+  among the guesses. Without the row lock in the code request, a verify
+  that deleted the row first made the request's update find nothing (500).
+  Code requests are few, so a lock over all of them costs nothing.
+- **A 2 s lock timeout on code requests** (`set local lock_timeout`, so it
+  ends with the transaction, also on a pooled connection). Every waiter
+  holds a pooled connection, so an anonymous flood could otherwise use up
+  the pool and stall boards and results. A timed-out request answers
+  `429 rate_limited`, also when the wait is for the code row; Hibernate
+  still logs two warnings, the SQL state `55P03` and PostgreSQL's "canceling
+  statement due to lock timeout", with no address.
 - **The mail goes out after the code is committed.** No lock is held while
   Resend answers (the blocking mailer waits up to 60 s). A failed send
-  answers 500 (logged), keeps the stored code and still counts toward the
-  limits, which errs on the side of the mail quota.
+  answers 500, keeps the stored code and still counts toward the limits,
+  which errs on the side of the mail quota.
+- **A failed send logs no exception text.** The mail server's reply is in
+  the exception's message (`recipient address not accepted: 550 ...`), and
+  replies often repeat the address; logged as a throwable it would put the
+  address in Cloud Logging for 30 days, against the contract's "no address
+  stored for a code request". So `requestCode` logs only the root cause's
+  class and the SMTP reply code (0 when there is none), which tells a
+  refused recipient (550) from a refused key (535). For the same reason
+  `quarkus.mailer.mock` (it logs every mail with recipient and code) and
+  `quarkus.mailer.log-invalid-recipients` stay off in prod.
 - **A code request stores hashes, never the address** (contract section 5,
   decided 2026-11-13 after the RAS-25 review; the site's privacy note
   promises it). An address that asks for a code and never verifies leaves
