@@ -24,6 +24,7 @@ import java.util.concurrent.Future;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.nullValue;
@@ -198,6 +199,64 @@ class PlayersResourceTest {
         response.statusCode(201).body("nick", equalTo("TWINGUEST"));
         assertThat(TestSql.count(dataSource, "select count(*) from player where nick_key = 'twinguest'"),
                 equalTo(2L));
+    }
+
+    // Cyrillic capitals, small letters and both, the digit zero, and case variants.
+    @Test
+    void shouldRefuseNickTaken_whenCreatePlayer_givenLookalikeOfAccountNick() throws SQLException {
+        // given
+        createAccount("BobCat", TestPlayers.uniqueEmail("bobcat"));
+        List<String> variants = List.of("\u0412\u041E\u0412\u0421\u0410\u0422", "\u0432\u043E\u0432\u0441\u0430\u0442",
+                "\u0412\u043E\u0432\u0441\u0430\u0442", "\u0412\u0030\u0412\u0421\u0410\u0422", "B0BCAT", "b0bcat",
+                "bobcat", "BOBCAT");
+
+        // when
+        List<String> answers = variants.stream()
+                .map(nick -> given().contentType(ContentType.JSON).body(Map.of("nick", nick, "kind", Rules.KIND_AGENT))
+                        .when().post("/players").then().extract())
+                .map(response -> response.statusCode() + " " + response.body().asString() + " "
+                        + response.header("Set-Cookie"))
+                .toList();
+
+        // then
+        assertThat(answers, equalTo(Collections.nCopies(variants.size(), "409 " + NICK_TAKEN_BODY + " null")));
+        assertThat(TestSql.count(dataSource, "select count(*) from player where nick_key = 'bobcat'"),
+                equalTo(1L));
+    }
+
+    @Test
+    void shouldRefuseNickTakenAndKeepGuest_whenRename_givenLookalikeOfAccountNick() throws SQLException {
+        // given
+        createAccount("Tomcat", TestPlayers.uniqueEmail("tomcat"));
+        String token = TestPlayers.createGuest("TomcatFan", Rules.KIND_HUMAN);
+        List<Object> expected = TestSql.row(dataSource, PLAYER_ROW, playerId(token));
+
+        // when
+        ValidatableResponse response = rename(token, "\u0422\u041E\u041C\u0421\u0410\u0422");
+
+        // then
+        response.statusCode(409).body(equalTo(NICK_TAKEN_BODY));
+        assertThat(TestSql.row(dataSource, PLAYER_ROW, playerId(token)), equalTo(expected));
+    }
+
+    // Latin, Cyrillic, and Latin with the digit zero.
+    @Test
+    void shouldCreateGuestsAndKeepTheirNicks_whenCreatePlayer_givenLookalikeNicksOfEachOther() throws SQLException {
+        // given
+        List<String> nicks = List.of("Comet", "\u0421\u041E\u041C\u0415\u0422", "C0MET");
+
+        // when
+        List<String> answers = nicks.stream()
+                .map(nick -> given().contentType(ContentType.JSON).body(Map.of("nick", nick, "kind", Rules.KIND_HUMAN))
+                        .when().post("/players").then().extract())
+                .map(response -> response.statusCode() + " " + response.path("nick"))
+                .toList();
+
+        // then
+        assertThat(answers, equalTo(nicks.stream().map(nick -> "201 " + nick).toList()));
+        List<Object> storedNicks = TestSql.rows(dataSource, "select nick from player where nick_key = 'comet'")
+                .stream().map(List::getFirst).toList();
+        assertThat(storedNicks, containsInAnyOrder(nicks.toArray()));
     }
 
     @Test

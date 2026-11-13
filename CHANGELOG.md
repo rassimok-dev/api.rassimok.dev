@@ -3,6 +3,93 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-13 (seventh) - Nick keys compare lookalike letters
+
+A nick written in Cyrillic letters that look like Latin ones, or with 0 for
+O, no longer gets past an account's nick (RAS-35; the user decided on a
+skeleton in the RAS-24 security review).
+
+- `Nicks.key` is now a lookalike skeleton: the NFKC-normalised, trimmed nick
+  in lower case, then each character of `Nicks.LOOKALIKES` replaced by the
+  letter at the same place in `Nicks.LATIN_EQUIVALENTS`. The Cyrillic
+  letters a, ve, ghe, ie, ka, em, en, o, er, es, te, u, ha, sha and the
+  soft sign (U+0430, U+0432, U+0433, U+0435, U+043A, U+043C, U+043D,
+  U+043E, U+0440, U+0441, U+0442, U+0443, U+0445, U+0448, U+044C) become
+  `a b r e k m h o p c t y x w b`, and the digit 0 becomes `o`. An account
+  `BOB` so holds `bob`, `B0B`, BOB in Cyrillic capitals, the same in
+  Cyrillic small letters, and every case mix of them.
+- The displayed nick does not change, and the nick rules do not either:
+  `isValid` still runs on the nick, so Latin and Cyrillic letters never mix
+  in one nick, also where the key would be all Latin. The chests board
+  still breaks ties by `nick_key`, so tied Cyrillic nicks may sort
+  differently.
+- Migration `V5` recomputes `nick_key` for every row with SQL `translate()`
+  and the same two strings; the partial unique index from `V4` stays.
+  Production has no accounts yet, so no conflict is expected. If two
+  accounts ever held keys that become one, the update fails on the index,
+  Flyway rolls `V5` back and the service does not start, so the deploy
+  fails; Cloud Run should keep serving the previous revision (reasoned, not
+  tried) until one of the two is renamed by hand.
+- Guests may still share a lookalike nick with each other. A guest that
+  already shares a key with an account keeps its nick, with the guest
+  marker, and cannot become an account under it (verify answers 409), as
+  before.
+- Tests:
+  - Unit (`NicksTest`): the key of each mapped letter in both cases and of
+    zero; every other nick character only lower-cased; ten spellings of
+    `bob` (Cyrillic capitals, small letters and both, zero, fullwidth) give
+    one key; three mixed-script nicks whose key would be `bob` are still
+    refused. The two existing Cyrillic key expectations now end in a Latin
+    `k`.
+  - `PlayersResourceTest`: an account `BobCat` refuses eight lookalike and
+    case variants on create (409, no cookie, no new row); a guest's rename
+    to `Tomcat` in Cyrillic capitals, an account's nick, is refused and
+    leaves the guest unchanged; three guests share `Comet` in Latin, in
+    Cyrillic and with a zero, each shown as typed.
+  - `NickKeyMigrationTest`: the `V5` file, run again on rows with the old
+    key (every nick character in one row, and three real nicks), gives
+    `Nicks.key` and changes no other column; two accounts whose keys `V5`
+    joins make it fail with a unique violation.
+  - `LoginRoundTripTest`, and so `LoginRoundTripIT` on the native binary:
+    an account `TeamBox` refuses its Cyrillic spelling and `teamb0x`.
+  - `TestPlayers.insertAccount` now writes `Nicks.key`, not SQL `lower()`.
+
+### Decisions worth not relitigating
+
+- **Lower case first, then the map, and a small letter is listed when it or
+  its capital looks like the Latin letter.** Mapping only the capitals
+  before lower-casing turns Cyrillic capital ve into B, but leaves the
+  small ve, whose confusable is a small capital B outside the nick
+  alphabet. BOB in Cyrillic capitals and the same nick in small letters
+  would then get two keys, and two accounts could hold them; the existing
+  one-key-per-case test would fail that way. Keys ignore case, so a letter
+  counts as a lookalike when either of its cases does. The cost: an account
+  `Tom` also holds its Cyrillic spelling in small letters, which looks less
+  alike.
+- **The map is what Unicode's `confusables.txt` (UTS #39, the file dated
+  2026-08-06) maps from a Cyrillic letter of the alphabet to one Latin
+  letter, plus 0.** Next to the ticket's examples that adds ghe (small ghe
+  looks like r), sha (w) and the soft sign (its capital looks like b). Left
+  out: Cyrillic letters listed as digits (capital ze as 3, small be as 6),
+  letters listed as two (yeru as `bl`, yu as `lO`), and Latin-side entries
+  (1, I and `|` as l, m as `rn`); the ticket names only 0. Yo is not mapped:
+  its confusable is E with a diaeresis, which a Latin nick cannot hold.
+- **`V5` maps the stored key, not the nick.** Every stored key is the nick
+  lower-cased by Java, so only the map is left. SQL `lower()` changes
+  Cyrillic letters only under some database locales, and the Neon
+  database's locale was not checked; mapping the key does not depend on it.
+  The update is idempotent.
+- **One map, written twice.** `LOOKALIKES` and `LATIN_EQUIVALENTS` mirror
+  the two arguments of `translate()`, and `V5` repeats them, because a
+  migration cannot read Java. `NickKeyMigrationTest` runs the `V5` file on
+  every nick character and compares with `Nicks.key`, so a typo in either
+  copy fails the build (measured: one changed letter in `V5` fails it).
+- **Not handled: the deploy window.** Flyway runs `V5` when the new
+  revision starts, while the old one still serves. A player created or
+  renamed by the old revision in that window keeps a key that is only
+  lower-cased, and verify trusts the stored key. Production has no accounts
+  yet; whether a repeat of the update after the deploy is worth it is open.
+
 ## 2026-11-13 (fifth) - Unique account nicks, guest merge and account deletion
 
 An account's nick now belongs to it, results follow the account to a new

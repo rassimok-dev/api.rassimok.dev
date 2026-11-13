@@ -113,6 +113,33 @@ class LoginRoundTripTest {
                 .then().statusCode(200).body("nick", equalTo("NativeGuest"));
     }
 
+    // Cyrillic capitals, and then the digit zero, for the Latin letters of the account's nick.
+    @Test
+    void shouldRefuseNickTaken_whenCreatePlayer_givenLookalikeOfAccountNick() throws IOException, InterruptedException {
+        // given
+        String holderToken = TestPlayers.createGuest("TeamBox", Rules.KIND_HUMAN);
+        String email = TestPlayers.uniqueEmail("team-box");
+        requestCode(email);
+        given().cookie(TestPlayers.COOKIE, holderToken).contentType(ContentType.JSON)
+                .body(Map.of("email", email, "code", sentCode(email)))
+                .when().post("/login/verify")
+                .then().statusCode(200).body("account", equalTo(true));
+
+        // when
+        ValidatableResponse cyrillic = given().contentType(ContentType.JSON)
+                .body(Map.of("nick", "\u0422\u0415\u0410\u041C\u0412\u041E\u0425", "kind", Rules.KIND_AGENT))
+                .when().post("/players")
+                .then();
+        ValidatableResponse zero = given().contentType(ContentType.JSON)
+                .body(Map.of("nick", "teamb0x", "kind", Rules.KIND_HUMAN))
+                .when().post("/players")
+                .then();
+
+        // then
+        cyrillic.statusCode(409).body("", equalTo(Map.of("error", ApiException.NICK_TAKEN)));
+        zero.statusCode(409).body("", equalTo(Map.of("error", ApiException.NICK_TAKEN)));
+    }
+
     protected String sentCode(String email) throws IOException, InterruptedException {
         MockMailbox mailbox = Arc.container().instance(MockMailbox.class).get();
         return codeIn(mailbox.getMailMessagesSentTo(email).getLast().getText());
