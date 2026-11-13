@@ -51,6 +51,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -206,44 +207,51 @@ class RaceEchoSocketTest {
     void shouldEchoInOrderOrDrop_whenSendText_givenBurstOfEmptyFrames() throws Exception {
         // given
         String token = newGuest();
-        try (Socket socket = handshakeByHand(token)) {
-            ByteArrayOutputStream burst = new ByteArrayOutputStream();
-            ByteArrayOutputStream expected = new ByteArrayOutputStream();
-            for (int i = 0; i < BURST_FRAMES; i++) {
-                burst.write(maskedTextFrame(""));
-                expected.write(EMPTY_ECHO);
-            }
-            burst.write(maskedTextFrame("hello"));
-            expected.write(echoFrame("hello"));
-
-            // when
-            socket.getOutputStream().write(burst.toByteArray());
-
-            // then
-            assertThat(echoOnNewSocket(token, "hello"), equalTo("hello"));
-            Received received = readUntilEnd(socket, expected.size());
-            assertThat(received.bytes(), equalTo(Arrays.copyOf(expected.toByteArray(), received.bytes().length)));
-            assertThat(received.wasEnded() || expected.size() == received.bytes().length, equalTo(true));
+        ByteArrayOutputStream burst = new ByteArrayOutputStream();
+        ByteArrayOutputStream expected = new ByteArrayOutputStream();
+        for (int i = 0; i < BURST_FRAMES; i++) {
+            burst.write(maskedTextFrame(""));
+            expected.write(EMPTY_ECHO);
         }
+        burst.write(maskedTextFrame("hello"));
+        expected.write(echoFrame("hello"));
+
+        // when
+        String echoedMeanwhile;
+        Received received;
+        try (Socket socket = handshakeByHand(token)) {
+            socket.getOutputStream().write(burst.toByteArray());
+            echoedMeanwhile = echoOnNewSocket(token, "hello");
+            received = readUntilEnd(socket, expected.size());
+        }
+        int openSockets = openSocketsUpToCap(token);
+
+        // then
+        assertThat(echoedMeanwhile, equalTo("hello"));
+        assertThat(received.bytes(), equalTo(Arrays.copyOf(expected.toByteArray(), received.bytes().length)));
+        assertThat(received.wasEnded() || expected.size() == received.bytes().length, equalTo(true));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     @Test
     void shouldDropConnection_whenPing_givenBurstOfPings() throws Exception {
         // given
         String token = newGuest();
-        try (Socket socket = handshakeByHand(token)) {
-            ByteArrayOutputStream burst = new ByteArrayOutputStream();
-            for (int i = 0; i < BURST_FRAMES; i++) {
-                burst.write(PING_FRAME);
-            }
-
-            // when
-            boolean wasDropped = wasDroppedAfterWriting(socket, burst.toByteArray());
-
-            // then
-            assertThat(wasDropped, equalTo(true));
-            assertThat(echoOnNewSocket(token, "hello"), equalTo("hello"));
+        ByteArrayOutputStream burst = new ByteArrayOutputStream();
+        for (int i = 0; i < BURST_FRAMES; i++) {
+            burst.write(PING_FRAME);
         }
+
+        // when
+        boolean wasDropped;
+        try (Socket socket = handshakeByHand(token)) {
+            wasDropped = wasDroppedAfterWriting(socket, burst.toByteArray());
+        }
+        int openSockets = openSocketsUpToCap(token);
+
+        // then
+        assertThat(wasDropped, equalTo(true));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     // The 1008 would wait behind the replies the client does not read, so
@@ -360,15 +368,17 @@ class RaceEchoSocketTest {
     void shouldDropConnection_whenPing_givenClientStopsReading() throws Exception {
         // given
         String token = newGuest();
+
+        // when
+        boolean wasDropped;
         try (Socket socket = handshakeByHand(token)) {
-
-            // when
-            boolean wasDropped = wasDroppedWhilePinging(socket.getOutputStream());
-
-            // then
-            assertThat(wasDropped, equalTo(true));
-            assertThat(echoOnNewSocket(token, "hello"), equalTo("hello"));
+            wasDropped = wasDroppedWhilePinging(socket.getOutputStream());
         }
+        int openSockets = openSocketsUpToCap(token);
+
+        // then
+        assertThat(wasDropped, equalTo(true));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     // After its 1008 the server still answers pings. Until the closing
@@ -377,24 +387,26 @@ class RaceEchoSocketTest {
     void shouldDropConnection_whenPing_givenServerClosedForLongMessage() throws Exception {
         // given
         String token = newGuest();
+
+        // when
+        boolean wasDropped;
         try (Socket socket = handshakeByHand(token)) {
             OutputStream output = socket.getOutputStream();
             output.write(tooLongTextFrame());
             Thread.sleep(SERVER_CLOSE_MILLIS);
-
-            // when
-            boolean wasDropped = wasDroppedWhilePinging(output);
-
-            // then
-            assertThat(wasDropped, equalTo(true));
-            assertThat(echoOnNewSocket(token, "hello"), equalTo("hello"));
+            wasDropped = wasDroppedWhilePinging(output);
         }
+        int openSockets = openSocketsUpToCap(token);
+
+        // then
+        assertThat(wasDropped, equalTo(true));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     // A client that leaves during its session lookup must not stay counted,
     // or 20 such handshakes would refuse every later socket.
     @Test
-    void shouldAcceptSocket_whenConnect_givenHandshakesAbandonedDuringLookup() throws Exception {
+    void shouldOpenSocketsUpToCap_whenConnect_givenHandshakesAbandonedDuringLookup() throws Exception {
         // given
         String token = newGuest();
         for (int i = 0; i < ABANDONED_HANDSHAKES; i++) {
@@ -404,10 +416,10 @@ class RaceEchoSocketTest {
         }
 
         // when
-        String echoed = echoOnNewSocket(token, "hello");
+        int openSockets = openSocketsUpToCap(token);
 
         // then
-        assertThat(echoed, equalTo("hello"));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     static Stream<Arguments> socketEndings() {
@@ -425,7 +437,7 @@ class RaceEchoSocketTest {
     // that left its socket counted would get 503 by the last connect.
     @ParameterizedTest
     @MethodSource("socketEndings")
-    void shouldAcceptSocket_whenConnect_givenMoreSocketsEndedThanCap(SocketEnding ending) throws Exception {
+    void shouldOpenSocketsUpToCap_whenConnect_givenMoreSocketsEndedThanCap(SocketEnding ending) throws Exception {
         // given
         String token = newGuest();
         for (int i = 0; i < Rules.SOCKETS_OPEN_MAX; i++) {
@@ -433,16 +445,16 @@ class RaceEchoSocketTest {
         }
 
         // when
-        String echoed = echoOnNewSocket(token, "hello");
+        int openSockets = openSocketsUpToCap(token);
 
         // then
-        assertThat(echoed, equalTo("hello"));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     // A refused handshake gives back the slot it took, or 20 refusals would
     // refuse every later socket.
     @Test
-    void shouldAcceptSocket_whenConnect_givenMoreRefusedHandshakesThanCap() throws Exception {
+    void shouldOpenSocketsUpToCap_whenConnect_givenMoreRefusedHandshakesThanCap() throws Exception {
         // given
         String token = newGuest();
         for (int i = 0; i < CAP_ATTEMPTS; i++) {
@@ -451,25 +463,60 @@ class RaceEchoSocketTest {
         }
 
         // when
-        String echoed = echoOnNewSocket(token, "hello");
+        int openSockets = openSocketsUpToCap(token);
 
         // then
-        assertThat(echoed, equalTo("hello"));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+    }
+
+    static Stream<Arguments> refusalsBeforeUpgrade() {
+        return Stream.of(
+                Arguments.of(Named.of("foreign origin", FOREIGN_ORIGIN), true, "HTTP/1.1 403 Forbidden"),
+                Arguments.of(Named.of("no session", ALLOWED_ORIGIN), false, "HTTP/1.1 401 Unauthorized"));
+    }
+
+    // Ending a refusal routes the request queued behind it at once. The slot
+    // must be back by then, or that request would count as a second
+    // handshake on the connection and get no answer.
+    @ParameterizedTest
+    @MethodSource("refusalsBeforeUpgrade")
+    void shouldUpgradeSecondRequest_whenConnect_givenRefusedHandshakeInSameWrite(String origin, boolean hasSession,
+                                                                                  String refusalLine) throws Exception {
+        // given
+        String token = newGuest();
+        String refused = upgradeRequest(echoUri, origin, hasSession ? token : "unknown", KEY + VERSION_13, "");
+        String accepted = upgradeRequest(echoUri, ALLOWED_ORIGIN, token, KEY + VERSION_13, "");
+
+        // when
+        List<String> statusLines = new ArrayList<>();
+        try (Socket socket = writeOnNewConnection(echoUri, refused + accepted)) {
+            statusLines.add(statusLine(readHead(socket)));
+            statusLines.add(statusLine(readHead(socket)));
+        }
+        int openSockets = openSocketsUpToCap(token);
+
+        // then
+        assertThat(statusLines, equalTo(List.of(refusalLine, SWITCHING_PROTOCOLS)));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     static Stream<Arguments> handshakeBodies() {
         String chunkedBody = Integer.toHexString(CHUNK_BYTES) + "\r\n" + "x".repeat(CHUNK_BYTES) + "\r\n0\r\n\r\n";
         return Stream.of(
-                Arguments.of(Named.of("chunked, over 8 KB", "Transfer-Encoding: chunked\r\n"), chunkedBody),
-                Arguments.of(Named.of("with a length", "Content-Length: 5\r\n"), "hello"));
+                Arguments.of(Named.of("chunked, over 8 KB", "Transfer-Encoding: chunked\r\n"), chunkedBody,
+                        BAD_REQUEST),
+                Arguments.of(Named.of("with a length", "Content-Length: 5\r\n"), "hello", BAD_REQUEST),
+                // A front end may add it to a request without a body.
+                Arguments.of(Named.of("length 0", "Content-Length: 0\r\n"), "", SWITCHING_PROTOCOLS));
     }
 
     // Vert.x reads a handshake's body before the upgrade, and over 8192
     // bytes it answers 413 without ever ending the upgrade, so a slot taken
-    // for it would never come back.
+    // for it would come back only when the connection closes.
     @ParameterizedTest
     @MethodSource("handshakeBodies")
-    void shouldAcceptSocket_whenConnect_givenMoreHandshakesWithBodyThanCap(String bodyHeader, String body)
+    void shouldOpenSocketsUpToCap_whenConnect_givenHandshakesWithBodyHeader(String bodyHeader, String body,
+                                                                            String expectedStatusLine)
             throws Exception {
         // given
         String token = newGuest();
@@ -481,16 +528,15 @@ class RaceEchoSocketTest {
         }
 
         // when
-        String echoed = echoOnNewSocket(token, "hello");
+        int openSockets = openSocketsUpToCap(token);
 
         // then
-        assertThat(statusLines, everyItem(equalTo(BAD_REQUEST)));
-        assertThat(echoed, equalTo("hello"));
+        assertThat(statusLines, everyItem(equalTo(expectedStatusLine)));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     // Vert.x routes a handshake sent right behind another once that one has
-    // upgraded. A slot it left counted shows only with the whole cap open:
-    // one more socket would still find room.
+    // upgraded.
     @Test
     void shouldOpenSocketsUpToCap_whenConnect_givenTwoHandshakesInOneWrite() throws Exception {
         // given
@@ -504,13 +550,11 @@ class RaceEchoSocketTest {
         }
 
         // when
-        for (int i = 0; i < Rules.SOCKETS_OPEN_MAX; i++) {
-            socketsToClose.add(connectWhenRoom(options(ALLOWED_ORIGIN, token)));
-        }
+        int openSockets = openSocketsUpToCap(token);
 
         // then
         assertThat(statusLines, everyItem(equalTo(SWITCHING_PROTOCOLS)));
-        assertThat(socketsToClose.size(), equalTo(Rules.SOCKETS_OPEN_MAX));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     static Stream<Arguments> otherVersions() {
@@ -519,6 +563,8 @@ class RaceEchoSocketTest {
                 Arguments.of(Named.of("version 8", KEY + "Sec-WebSocket-Version: 8\r\n")));
     }
 
+    // Refused before a slot is taken; refused as often as the cap has
+    // slots twice over, so a refusal that took one would lock the cap.
     @ParameterizedTest
     @MethodSource("otherVersions")
     void shouldRefuseHandshake_whenConnect_givenOtherWebSocketVersion(String versionHeaders) throws Exception {
@@ -526,14 +572,18 @@ class RaceEchoSocketTest {
         String token = newGuest();
 
         // when
-        String head;
-        try (Socket socket = sendRequest(echoUri, token, versionHeaders, "")) {
-            head = readHead(socket);
+        List<String> heads = new ArrayList<>();
+        for (int i = 0; i < CAP_ATTEMPTS; i++) {
+            try (Socket socket = sendRequest(echoUri, token, versionHeaders, "")) {
+                heads.add(readHead(socket));
+            }
         }
+        int openSockets = openSocketsUpToCap(token);
 
         // then
-        assertThat(statusLine(head), equalTo(UPGRADE_REQUIRED));
-        assertThat(head, containsString("\r\n" + VERSION_13));
+        assertThat(heads, everyItem(startsWith(UPGRADE_REQUIRED + "\r\n")));
+        assertThat(heads, everyItem(containsString("\r\n" + VERSION_13)));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
     @Test
@@ -674,6 +724,16 @@ class RaceEchoSocketTest {
         return socket;
     }
 
+    // A slot that never came back shows only with every slot taken at once:
+    // with one lost, a single new socket would still find room.
+    private int openSocketsUpToCap(String token) throws Exception {
+        closeSockets();
+        for (int i = 0; i < Rules.SOCKETS_OPEN_MAX; i++) {
+            socketsToClose.add(connectWhenRoom(options(ALLOWED_ORIGIN, token)));
+        }
+        return socketsToClose.size();
+    }
+
     private String echoOnNewSocket(String token, String text) throws Exception {
         WebSocket socket = connectWhenRoom(options(ALLOWED_ORIGIN, token));
         socketsToClose.add(socket);
@@ -710,23 +770,24 @@ class RaceEchoSocketTest {
     }
 
     static Socket sendTwoUpgradeRequests(URI uri, String token) throws IOException {
-        String request = upgradeRequest(uri, token, KEY + VERSION_13, "");
+        String request = upgradeRequest(uri, ALLOWED_ORIGIN, token, KEY + VERSION_13, "");
         return writeOnNewConnection(uri, request + request);
     }
 
     private static Socket sendRequest(URI uri, String token, String handshakeHeaders, String body)
             throws IOException {
-        return writeOnNewConnection(uri, upgradeRequest(uri, token, handshakeHeaders, body));
+        return writeOnNewConnection(uri, upgradeRequest(uri, ALLOWED_ORIGIN, token, handshakeHeaders, body));
     }
 
     // Each of the handshake headers ends in CRLF; the body follows the blank line.
-    private static String upgradeRequest(URI uri, String token, String handshakeHeaders, String body) {
+    private static String upgradeRequest(URI uri, String origin, String token, String handshakeHeaders,
+                                         String body) {
         return "GET " + uri.getPath() + " HTTP/1.1\r\n"
                 + "Host: " + uri.getHost() + ":" + uri.getPort() + "\r\n"
                 + "Upgrade: websocket\r\n"
                 + "Connection: Upgrade\r\n"
                 + handshakeHeaders
-                + "Origin: " + ALLOWED_ORIGIN + "\r\n"
+                + "Origin: " + origin + "\r\n"
                 + "Cookie: " + TestPlayers.COOKIE + "=" + token + "\r\n"
                 + "\r\n"
                 + body;

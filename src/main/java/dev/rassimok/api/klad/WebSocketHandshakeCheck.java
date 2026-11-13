@@ -9,12 +9,13 @@ import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.ServerWebSocket;
 import io.vertx.core.http.WebSocketFrame;
+import io.vertx.core.net.impl.ConnectionBase;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
@@ -42,9 +43,10 @@ public class WebSocketHandshakeCheck {
     private final String allowedOrigin;
     private final Predicate<String> isValidSession;
     private final OpenSockets openSockets;
-    // Added just before toWebSocket(), removed when the upgrade fails or the
-    // socket closes, so it never holds more connections than the cap has slots.
-    private final Set<HttpConnection> upgradedConnections = ConcurrentHashMap.newKeySet();
+    // True while the connection holds a slot. The entry stays until the
+    // connection closes, so a kept-alive connection gets one close listener,
+    // not one per handshake.
+    private final Map<HttpConnection, Boolean> slotHolders = new ConcurrentHashMap<>();
 
     @Inject
     WebSocketHandshakeCheck(@ConfigProperty(name = "klad.websocket.allowed-origin") String allowedOrigin,
@@ -63,12 +65,13 @@ public class WebSocketHandshakeCheck {
     // the read limits.
     void upgrade(RoutingContext context, BiConsumer<SocketSender, String> onText) {
         HttpServerRequest request = context.request();
+        HttpConnection connection = request.connection();
         MultiMap headers = request.headers();
         // The cap and the Origin are checked on the event loop, so a full
         // instance or a foreign page never takes a worker thread.
         if (!headers.contains(HttpHeaders.UPGRADE, HttpHeaders.WEBSOCKET, true)) {
             context.next();
-        } else if (upgradedConnections.contains(request.connection())) {
+        } else if (holdsSlot(connection)) {
             // Sent right behind a handshake, and routed once that one upgraded.
             // The connection speaks WebSocket now, so no HTTP answer fits, and
             // toWebSocket() would hand over the same socket again.
@@ -79,10 +82,10 @@ public class WebSocketHandshakeCheck {
             // would queue three times as many frames as with version 13.
             context.response().putHeader(VERSION_HEADER, VERSION);
             refuse(context, OTHER_VERSION);
-        } else if (!openSockets.tryOpen()) {
+        } else if (!takeSlot(connection)) {
             refuse(context, TOO_MANY_SOCKETS);
         } else if (!isAllowedOrigin(request.getHeader(HttpHeaders.ORIGIN))) {
-            openSockets.closed();
+            giveBackSlot(connection);
             refuse(context, FOREIGN_ORIGIN);
         } else {
             Cookie cookie = request.getCookie(Sessions.COOKIE);
@@ -90,7 +93,7 @@ public class WebSocketHandshakeCheck {
             // The session lookup blocks, so it runs on a worker thread. Its result
             // comes back on the request's event loop, where the upgrade happens.
             Vertx.currentContext().executeBlocking(() -> isValidSession.test(token), false)
-                    .onComplete(lookup -> afterLookup(context, lookup, onText));
+                    .onComplete(lookup -> afterLookup(context, connection, lookup, onText));
         }
     }
 
@@ -98,36 +101,62 @@ public class WebSocketHandshakeCheck {
         return allowedOrigin.equals(origin);
     }
 
-    // A handshake has no body. Vert.x reads one before the upgrade, and over
-    // 8192 bytes it answers 413 without ending the upgrade, so the slot taken
-    // for it would never come back.
+    // A handshake has no body. Vert.x would read one into memory before the
+    // upgrade, and over 8192 bytes answer 413 without ending the upgrade.
     private static boolean hasBody(MultiMap headers) {
         String contentLength = headers.get(HttpHeaders.CONTENT_LENGTH);
         return headers.contains(HttpHeaders.TRANSFER_ENCODING) || (null != contentLength && !"0".equals(contentLength));
     }
 
+    // A slot belongs to a connection and comes back once: at a refusal, or
+    // when the socket or the connection closes. The connection's close also
+    // covers any path that ends in neither, such as an upgrade that never ends.
+    private boolean takeSlot(HttpConnection connection) {
+        boolean hasSlot = openSockets.tryOpen();
+        if (hasSlot && null == slotHolders.put(connection, true)) {
+            // The close future takes any number of listeners; the close handler
+            // takes one, and Quarkus sets it when the connections are limited.
+            ConnectionBase tcpConnection = (ConnectionBase) connection;
+            tcpConnection.closeFuture().onComplete(ignored -> {
+                giveBackSlot(connection);
+                slotHolders.remove(connection);
+            });
+        }
+        return hasSlot;
+    }
+
+    private boolean holdsSlot(HttpConnection connection) {
+        return Boolean.TRUE.equals(slotHolders.get(connection));
+    }
+
+    // Called before a refusal ends its response: that routes the request
+    // queued behind it at once, which must not find the slot still held.
+    private void giveBackSlot(HttpConnection connection) {
+        if (slotHolders.replace(connection, true, false)) {
+            openSockets.closed();
+        }
+    }
+
     // The upgrade of a gone client would throw and log an error, so it is
     // refused first. The handshake runs one event-loop task after
-    // toWebSocket(); a close in between fails the upgrade and frees the slot.
-    private void afterLookup(RoutingContext context, AsyncResult<Boolean> lookup,
+    // toWebSocket(); a close in between fails the upgrade.
+    private void afterLookup(RoutingContext context, HttpConnection connection, AsyncResult<Boolean> lookup,
                              BiConsumer<SocketSender, String> onText) {
         if (context.response().closed()) {
-            openSockets.closed();
+            giveBackSlot(connection);
             refuse(context, CLIENT_GONE);
         } else if (lookup.failed()) {
-            openSockets.closed();
+            giveBackSlot(connection);
             context.fail(lookup.cause());
         } else if (!lookup.result()) {
-            openSockets.closed();
+            giveBackSlot(connection);
             refuse(context, NO_SESSION);
         } else {
-            HttpConnection connection = context.request().connection();
-            upgradedConnections.add(connection);
             context.request().toWebSocket().onComplete(upgraded -> {
                 if (upgraded.succeeded()) {
                     open(upgraded.result(), connection, onText);
                 } else {
-                    closed(connection);
+                    giveBackSlot(connection);
                 }
             });
         }
@@ -136,16 +165,11 @@ public class WebSocketHandshakeCheck {
     private void open(ServerWebSocket socket, HttpConnection connection, BiConsumer<SocketSender, String> onText) {
         SocketSender sender = new SocketSender(socket, connection);
         socket.pause();
-        socket.closeHandler(ignored -> closed(connection));
+        socket.closeHandler(ignored -> giveBackSlot(connection));
         socket.exceptionHandler(ignored -> sender.drop());
         socket.frameHandler(frame -> afterFrame(socket, sender, frame));
         socket.textMessageHandler(message -> onText.accept(sender, message));
         socket.fetch(1);
-    }
-
-    private void closed(HttpConnection connection) {
-        upgradedConnections.remove(connection);
-        openSockets.closed();
     }
 
     // Vert.x calls this after the endpoint's message handler, and fetches by
