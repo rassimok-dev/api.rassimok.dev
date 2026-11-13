@@ -1,5 +1,6 @@
 package dev.rassimok.api.klad;
 
+import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpConnection;
 import io.vertx.core.http.ServerWebSocket;
 import io.vertx.core.net.impl.ConnectionBase;
@@ -36,8 +37,12 @@ final class SocketSender {
         }
     }
 
+    // A client that does not answer the close frame, or does not read it,
+    // would hold its slot until Vert.x's 10 s closing timeout, so the drop
+    // follows after a short grace. Dropping an ended connection does nothing.
     void close(short code, String reason) {
         socket.close(code, reason);
+        Vertx.currentContext().owner().setTimer(Rules.SOCKET_CLOSE_GRACE.toMillis(), ignored -> drop());
     }
 
     // Ends the socket at once, without a close frame. HttpConnection.close()

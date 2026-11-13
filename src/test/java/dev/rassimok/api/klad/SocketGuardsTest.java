@@ -52,6 +52,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
+import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -95,6 +96,8 @@ class SocketGuardsTest {
     private static final long DROP_SECONDS = 5;
     // Time for the server to send its 1008 before the first ping arrives.
     private static final long SERVER_CLOSE_MILLIS = 500;
+    // The grace drop is 1 s; the rest is time to connect 20 sockets.
+    private static final long GRACE_DROP_MILLIS_MAX = 3000;
     private static final String SWITCHING_PROTOCOLS = "HTTP/1.1 101 Switching Protocols";
     private static final String BAD_REQUEST = "HTTP/1.1 400 Bad Request";
     private static final String FORBIDDEN = "HTTP/1.1 403 Forbidden";
@@ -426,6 +429,74 @@ class SocketGuardsTest {
         // then
         assertThat(wasDropped, equalTo(true));
         assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+    }
+
+    // A client that answers neither the 1008 nor anything else would hold its
+    // slot until Vert.x's closing timeout of 10 s; the grace drop ends it
+    // after about 1 s, and the whole cap opens again.
+    @ParameterizedTest
+    @MethodSource("routes")
+    void shouldOpenSocketsUpToCap_whenConnect_givenClientsIgnoringServerClose(SocketRoute route)
+            throws Exception {
+        // given
+        List<Socket> silentClients = new ArrayList<>();
+        try {
+            for (SocketRoute.Seat seat : route.newSeats(Rules.SOCKETS_OPEN_MAX)) {
+                silentClients.add(handshakeByHand(seat));
+            }
+
+            // when
+            long start = System.nanoTime();
+            for (Socket silentClient : silentClients) {
+                silentClient.getOutputStream().write(tooLongTextFrame());
+            }
+            int openSockets = openSocketsUpToCap(route);
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+            // then
+            assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+            assertThat(elapsedMillis, lessThan(GRACE_DROP_MILLIS_MAX));
+        } finally {
+            for (Socket silentClient : silentClients) {
+                silentClient.close();
+            }
+        }
+    }
+
+    // The same for a socket the server replaces: ten members each connect
+    // twice, the first sockets read nothing, and the cap is full until the
+    // grace drop ends them.
+    @ParameterizedTest
+    @MethodSource("routes")
+    void shouldOpenSocketsUpToCap_whenConnect_givenReplacedClientsIgnoringServerClose(SocketRoute route)
+            throws Exception {
+        // given
+        List<Socket> clients = new ArrayList<>();
+        try {
+            List<SocketRoute.Seat> seats = route.newSeats(Rules.SOCKETS_OPEN_MAX / 2);
+            for (SocketRoute.Seat seat : seats) {
+                clients.add(handshakeByHand(seat));
+            }
+
+            // when
+            long start = System.nanoTime();
+            for (SocketRoute.Seat seat : seats) {
+                clients.add(handshakeByHand(seat));
+            }
+            for (Socket replacingClient : clients.subList(seats.size(), clients.size())) {
+                replacingClient.close();
+            }
+            int openSockets = openSocketsUpToCap(route);
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+            // then
+            assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+            assertThat(elapsedMillis, lessThan(GRACE_DROP_MILLIS_MAX));
+        } finally {
+            for (Socket client : clients) {
+                client.close();
+            }
+        }
     }
 
     // A client that leaves during its session lookup must not stay counted,

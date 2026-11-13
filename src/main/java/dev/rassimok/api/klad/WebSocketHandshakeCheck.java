@@ -181,7 +181,20 @@ public class WebSocketHandshakeCheck {
                       SocketEndpoint endpoint) {
         SocketSender sender = new SocketSender(socket, connection);
         socket.pause();
-        SocketListener listener = endpoint.open(player, sender);
+        SocketListener listener = null;
+        try {
+            listener = endpoint.open(player, sender);
+        } catch (RuntimeException e) {
+            // The connection's close gives the slot back.
+            sender.drop();
+        }
+        if (null != listener) {
+            listenTo(socket, connection, sender, listener);
+        }
+    }
+
+    private void listenTo(ServerWebSocket socket, HttpConnection connection, SocketSender sender,
+                          SocketListener listener) {
         socket.closeHandler(ignored -> {
             giveBackSlot(connection);
             listener.onClose();

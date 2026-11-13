@@ -58,6 +58,8 @@ final class Rules {
     // the cap for the whole service: 5 full races at once.
     static final int SOCKETS_OPEN_MAX = 20;
     static final int SOCKET_UNFINISHED_SENDS_MAX = 8;
+    // How long a socket may take to end after the server's close frame.
+    static final Duration SOCKET_CLOSE_GRACE = Duration.ofSeconds(1);
 
     // Presence and rooms live in the memory of the one instance; the caps
     // bound how much of its 256 MB they can take.

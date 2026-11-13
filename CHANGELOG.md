@@ -169,21 +169,35 @@ server never simulates the game.
   once, against up to 100 rooms. The rest of Cloud Run's 80 request slots
   stay free for REST, which every lobby needs. A sixth race's players get
   503 and the game shows a failed socket. At a full cap a reconnect also
-  gets 503 until the old socket's slot comes back, and a socket whose
-  client vanished without a close holds its slot until the idle close
-  (60 s without a message) or Vert.x's 10 s closing timeout after a close,
-  which can outlast the 30 s reconnect wait.
+  gets 503 until the old socket's slot comes back. A socket whose client
+  vanished without a close holds its slot until the idle close (60 s
+  without a message).
+- **Grace drop after every close the server starts.** A client that does
+  not answer a close frame, or has stopped reading, used to hold its slot
+  until Vert.x's 10 s closing timeout. Now every close the server starts
+  (replaced, idle, race_over, left, the host's new room, and 1008
+  `message_too_long`) also starts, in the same task on the socket's own
+  event loop, a timer of `Rules.SOCKET_CLOSE_GRACE` (1 s) that drops the
+  connection. A drop on a connection that has ended does nothing, so a
+  client that did answer is unaffected. A replaced socket therefore frees
+  its slot within about 1 s whatever its client does, which also bounds
+  how many slots one cookie can hold by reconnecting. Tests open the whole
+  cap with raw clients that read nothing and ignore the close, after a
+  1008 and after a replace, and need it back in under 3 s (they take 10 s
+  without the drop).
+- **A throwing `endpoint.open` drops the socket** instead of leaving a
+  paused socket with no handlers; the handlers are installed only once the
+  listener exists, and the connection's close gives the slot back.
 - **The parser skips text that does not start with a brace**, which cannot
   be a JSON object, so a flood of empty or junk frames costs no exception
   each.
-- **Round-6 review items, not done here:** holding the slot until the
-  session lookup returns (bounding the lookups to 20) would change when a
-  slot comes back, so it was left for a ticket of its own; the "Result is
-  already complete" ERROR when a client leaves right after `toWebSocket()`
-  was not tried; a per-player socket cap is mostly answered by one socket
-  per member (a second connect replaces the first), but one cookie can
-  still hold many slots briefly by reconnecting while its replaced sockets
-  close.
+- **Round-6 review items, deferred as follow-ups** (RAS-29 r6): bounding
+  the session lookups in flight (holding the slot until the lookup returns
+  would change when a slot comes back, so it needs a ticket of its own);
+  the "Result is already complete" ERROR when a client leaves right after
+  `toWebSocket()`, not tried; and a per-player socket cap, mostly answered
+  by one socket per member (a second connect replaces the first) and now
+  by the 1 s grace drop.
 - **`application.properties` is unchanged.** Its WebSocket comment still
   says the endpoint refuses a message over 512 bytes; the check does that
   now, for every route. The file is CODEOWNERS-protected and this ticket
@@ -213,7 +227,7 @@ server never simulates the game.
     WARN or above, apart from the known line about
     `quarkus.log.console.json`.
   - A flood keeps the one CPU busy for as long as it lasts (here about 2.5
-    minutes); the 4-minute race cap ends such a socket at the latest then.
+    minutes).
 
 ## 2026-11-13 (eighth) - Presence and rooms in memory, one instance
 
