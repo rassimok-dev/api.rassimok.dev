@@ -35,6 +35,15 @@ class DatabaseMigrationTest {
     }
 
     @Test
+    void shouldCreateLoginTables_whenMigrateAtStart() throws SQLException {
+        // when
+        List<String> tableNames = publicTableNames();
+
+        // then
+        assertThat(tableNames, hasItems("login_code", "login_mail"));
+    }
+
+    @Test
     void shouldRejectPlayer_whenInsert_givenUnknownKind() {
         // given
         String insert = """

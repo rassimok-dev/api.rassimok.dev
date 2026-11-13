@@ -12,6 +12,10 @@ class ApiException extends RuntimeException {
     static final String INVALID_RESULT = "invalid_result";
     static final String INVALID_QUERY = "invalid_query";
     static final String RATE_LIMITED = "rate_limited";
+    static final String INVALID_EMAIL = "invalid_email";
+    static final String INVALID_CODE = "invalid_code";
+    static final String TOO_MANY_ATTEMPTS = "too_many_attempts";
+    static final String NICK_TAKEN = "nick_taken";
 
     private final Response.Status status;
     private final String code;

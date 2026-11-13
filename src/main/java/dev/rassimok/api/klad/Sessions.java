@@ -88,7 +88,7 @@ public class Sessions {
         }
     }
 
-    private PlayerSession findValid(String token, Instant now) {
+    PlayerSession findValid(String token, Instant now) {
         PlayerSession session = null == token ? null : PlayerSession.findById(hash(token));
         return null != session && session.expiresAt.isAfter(now) ? session : null;
     }
