@@ -13,7 +13,8 @@ import java.time.Instant;
 public class LoginCode extends PanacheEntityBase {
 
     @Id
-    public String email;
+    @Column(name = "email_hash")
+    public String emailHash;
 
     @Column(name = "code_hash")
     public String codeHash;

@@ -17,6 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.sql.DataSource;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -48,7 +49,7 @@ class LoginResourceTest {
     private static final String CLEARED_COOKIE = "klad_session=; Path=/klad/api; HttpOnly; Secure; "
             + "SameSite=Strict; Max-Age=0";
     private static final String LOGIN_CODE_ROW = """
-            select email, code_hash, attempts, expires_at, created_at from login_code where email = ?
+            select email_hash, code_hash, attempts, expires_at, created_at from login_code where email_hash = ?
             """;
 
     @Inject
@@ -88,12 +89,41 @@ class LoginResourceTest {
         List<Object> stored = TestSql.row(dataSource, """
                 select code_hash, attempts, expires_at - created_at = interval '10 minutes',
                        now() - created_at < interval '1 minute'
-                from login_code where email = ?
-                """, email);
+                from login_code where email_hash = ?
+                """, Sessions.hash(email));
         assertThat(stored, equalTo(List.of(LoginCodes.hash(email, code), 0, true, true)));
         assertThat(TestSql.count(dataSource, "select count(*) from login_mail where email_hash = ?",
                 Sessions.hash(email)), equalTo(1L));
         assertThat(TestSql.count(dataSource, "select count(*) from login_mail"), equalTo(1L));
+    }
+
+    @Test
+    void shouldStoreAddressInNoTable_whenRequestCode() throws SQLException {
+        // given
+        String email = TestPlayers.uniqueEmail("hidden");
+
+        // when
+        given().contentType(ContentType.JSON).body(Map.of("email", " " + email.toUpperCase(Locale.ROOT)))
+                .when().post("/login/code")
+                .then().statusCode(202);
+
+        // then
+        assertThat(codeRowsFor(email), equalTo(1L));
+        assertThat(tablesHolding(email), equalTo(List.of()));
+    }
+
+    @Test
+    void shouldStoreAddressOnlyInPlayer_whenVerify_givenGuestBecomesAccount() throws SQLException {
+        // given
+        String guestToken = TestPlayers.createGuest("AddressKeeper", Rules.KIND_HUMAN);
+        String email = TestPlayers.uniqueEmail("kept");
+        String code = requestCode(email);
+
+        // when
+        verify(guestToken, email, code).statusCode(200);
+
+        // then
+        assertThat(tablesHolding(email), equalTo(List.of("player")));
     }
 
     @Test
@@ -149,17 +179,17 @@ class LoginResourceTest {
     void shouldReplacePreviousCode_whenRequestCode_givenCodeAlreadySent() throws SQLException {
         // given
         String email = TestPlayers.uniqueEmail("again");
-        postCode(email).statusCode(202);
-        verify(null, email, "wrong").statusCode(400);
+        verify(null, email, otherCode(requestCode(email))).statusCode(400);
+        assertThat(TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email)).get(2), equalTo(1));
 
         // when
         postCode(email).statusCode(202);
 
         // then
         String secondCode = sentCode(email);
-        assertThat(TestSql.count(dataSource, "select count(*) from login_code where email = ?", email), equalTo(1L));
-        List<Object> stored = TestSql.row(dataSource, "select code_hash, attempts from login_code where email = ?",
-                email);
+        assertThat(codeRowsFor(email), equalTo(1L));
+        List<Object> stored = TestSql.row(dataSource,
+                "select code_hash, attempts from login_code where email_hash = ?", Sessions.hash(email));
         assertThat(stored, equalTo(List.of(LoginCodes.hash(email, secondCode), 0)));
     }
 
@@ -167,17 +197,35 @@ class LoginResourceTest {
     void shouldDeleteExpiredCodesOfOtherEmails_whenRequestCode() throws SQLException {
         // given
         String expiredEmail = TestPlayers.uniqueEmail("stale");
-        TestSql.execute(dataSource, """
-                insert into login_code (email, code_hash, attempts, expires_at, created_at)
-                values (?, 'stale', 0, now() - interval '1 second', now() - interval '601 seconds')
-                """, expiredEmail);
+        seedExpiredCode(expiredEmail);
 
         // when
         postCode(TestPlayers.uniqueEmail("sweeper")).statusCode(202);
 
         // then
-        assertThat(TestSql.count(dataSource, "select count(*) from login_code where email = ?", expiredEmail),
-                equalTo(0L));
+        assertThat(codeRowsFor(expiredEmail), equalTo(0L));
+    }
+
+    @Test
+    void shouldStillDeleteOldRows_whenRequestCode_givenRefusedRequest() throws SQLException {
+        // given
+        String email = TestPlayers.uniqueEmail("refused");
+        for (int i = 0; i < Rules.CODES_PER_EMAIL; i++) {
+            postCode(email).statusCode(202);
+        }
+        seedSentMails(1, "25 hours");
+        String expiredEmail = TestPlayers.uniqueEmail("stale-again");
+        seedExpiredCode(expiredEmail);
+
+        // when
+        ValidatableResponse response = postCode(email);
+
+        // then
+        response.statusCode(429).body("error", equalTo(ApiException.RATE_LIMITED));
+        assertThat(TestSql.count(dataSource, "select count(*) from login_mail"),
+                equalTo((long) Rules.CODES_PER_EMAIL));
+        assertThat(codeRowsFor(expiredEmail), equalTo(0L));
+        assertThat(codeRowsFor(email), equalTo(1L));
     }
 
     @Test
@@ -289,12 +337,14 @@ class LoginResourceTest {
         List<Object> expected = TestSql.row(dataSource, player, playerId);
         expected.set(4, email);
         String code = requestCode(email);
+        int sentBefore = mailbox.getTotalMessagesSent();
 
         // when
         ExtractableResponse<Response> response = verify(guestToken, email, code).extract();
 
         // then
         assertThat(response.statusCode(), equalTo(200));
+        assertThat(mailbox.getTotalMessagesSent(), equalTo(sentBefore));
         assertThat(response.as(LoginView.class), equalTo(new LoginView("Becomer", Rules.KIND_AGENT, true, email, false)));
         String newToken = tokenIn(response);
         assertThat(newToken, not(equalTo(guestToken)));
@@ -302,7 +352,7 @@ class LoginResourceTest {
         assertThat(playerId(newToken), equalTo(playerId));
         given().cookie(TestPlayers.COOKIE, guestToken).when().get("/players/me")
                 .then().statusCode(401).body("error", equalTo(ApiException.NO_SESSION));
-        assertThat(TestSql.count(dataSource, "select count(*) from login_code where email = ?", email), equalTo(0L));
+        assertThat(codeRowsFor(email), equalTo(0L));
     }
 
     @Test
@@ -367,7 +417,7 @@ class LoginResourceTest {
         // given
         String email = TestPlayers.uniqueEmail("typo");
         String code = requestCode(email);
-        List<Object> expected = TestSql.row(dataSource, LOGIN_CODE_ROW, email);
+        List<Object> expected = TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email));
         expected.set(2, 1);
 
         // when
@@ -375,7 +425,7 @@ class LoginResourceTest {
 
         // then
         response.statusCode(400).body("error", equalTo(ApiException.INVALID_CODE));
-        assertThat(TestSql.row(dataSource, LOGIN_CODE_ROW, email), equalTo(expected));
+        assertThat(TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email)), equalTo(expected));
     }
 
     @Test
@@ -410,7 +460,7 @@ class LoginResourceTest {
 
         // then
         fifth.statusCode(429).body("error", equalTo(ApiException.TOO_MANY_ATTEMPTS));
-        assertThat(TestSql.count(dataSource, "select count(*) from login_code where email = ?", email), equalTo(0L));
+        assertThat(codeRowsFor(email), equalTo(0L));
         verify(guestToken, email, code).statusCode(400).body("error", equalTo(ApiException.INVALID_CODE));
     }
 
@@ -427,7 +477,7 @@ class LoginResourceTest {
 
         // then
         assertThat(statusCounts, equalTo(Map.of(400, 9L, 429, 1L)));
-        assertThat(TestSql.count(dataSource, "select count(*) from login_code where email = ?", email), equalTo(0L));
+        assertThat(codeRowsFor(email), equalTo(0L));
     }
 
     @Test
@@ -436,15 +486,16 @@ class LoginResourceTest {
         String email = TestPlayers.uniqueEmail("late");
         String guestToken = TestPlayers.createGuest("Late", Rules.KIND_HUMAN);
         String code = requestCode(email);
-        TestSql.execute(dataSource, "update login_code set expires_at = now() - interval '1 second' where email = ?",
-                email);
+        TestSql.execute(dataSource,
+                "update login_code set expires_at = now() - interval '1 second' where email_hash = ?",
+                Sessions.hash(email));
 
         // when
         ValidatableResponse response = verify(guestToken, email, code);
 
         // then
         response.statusCode(400).body("error", equalTo(ApiException.INVALID_CODE));
-        assertThat(TestSql.count(dataSource, "select count(*) from login_code where email = ?", email), equalTo(0L));
+        assertThat(codeRowsFor(email), equalTo(0L));
         given().cookie(TestPlayers.COOKIE, guestToken).when().get("/players/me").then().body("account", equalTo(false));
     }
 
@@ -476,11 +527,12 @@ class LoginResourceTest {
     }
 
     @Test
-    void shouldRefuseNumberCode_whenVerify_givenRightDigitsAsNumber() {
+    void shouldRefuseWithoutCountingAttempt_whenVerify_givenRightDigitsAsNumber() throws SQLException {
         // given
         String email = TestPlayers.uniqueEmail("number");
         String guestToken = TestPlayers.createGuest("Number", Rules.KIND_HUMAN);
         String code = requestCode(email);
+        List<Object> expected = TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email));
         String body = "{\"email\":\"" + email + "\",\"code\":" + Integer.parseInt(code) + "}";
 
         // when
@@ -489,7 +541,32 @@ class LoginResourceTest {
                 .when().post("/login/verify").then();
 
         // then
-        response.statusCode(400).body("error", equalTo(ApiException.INVALID_CODE));
+        response.statusCode(400).body("error", equalTo(ApiException.INVALID_CODE)).header("Set-Cookie", nullValue());
+        assertThat(TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email)), equalTo(expected));
+        verify(guestToken, email, code).statusCode(200).body("account", equalTo(true));
+    }
+
+    // Each value follows the email in the body; an empty one leaves the code out.
+    @ParameterizedTest
+    @ValueSource(strings = {"", ",\"code\":null", ",\"code\":true", ",\"code\":\"12345\"",
+            ",\"code\":\"1234567\"", ",\"code\":\" 12345\"", ",\"code\":\"12345a\"",
+            ",\"code\":\"\\u0661\\u0662\\u0663\\u0664\\u0665\\u0666\"",
+            ",\"code\":\"\\uff11\\uff12\\uff13\\uff14\\uff15\\uff16\"",
+            ",\"code\":[\"123456\"]", ",\"code\":{}"})
+    void shouldRefuseWithoutCountingAttempt_whenVerify_givenMalformedCode(String codeField) throws SQLException {
+        // given
+        String email = TestPlayers.uniqueEmail("malformed");
+        requestCode(email);
+        List<Object> expected = TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email));
+        String body = "{\"email\":\"" + email + "\"" + codeField + "}";
+
+        // when
+        ValidatableResponse response = given().contentType(ContentType.JSON).body(body)
+                .when().post("/login/verify").then();
+
+        // then
+        response.statusCode(400).body("error", equalTo(ApiException.INVALID_CODE)).header("Set-Cookie", nullValue());
+        assertThat(TestSql.row(dataSource, LOGIN_CODE_ROW, Sessions.hash(email)), equalTo(expected));
     }
 
     @Test
@@ -508,7 +585,7 @@ class LoginResourceTest {
         given().cookie(TestPlayers.COOKIE, guestToken).when().get("/players/me")
                 .then().statusCode(200).body("account", equalTo(false)).body("email", nullValue());
         assertThat(TestSql.count(dataSource, "select count(*) from player where email = ?", email), equalTo(0L));
-        assertThat(TestSql.count(dataSource, "select count(*) from login_code where email = ?", email), equalTo(0L));
+        assertThat(codeRowsFor(email), equalTo(0L));
     }
 
     @Test
@@ -523,7 +600,7 @@ class LoginResourceTest {
         // then
         response.statusCode(401).body("error", equalTo(ApiException.NO_SESSION)).header("Set-Cookie", nullValue());
         assertThat(TestSql.count(dataSource, "select count(*) from player where email = ?", email), equalTo(0L));
-        assertThat(TestSql.count(dataSource, "select count(*) from login_code where email = ?", email), equalTo(0L));
+        assertThat(codeRowsFor(email), equalTo(0L));
     }
 
     @Test
@@ -547,6 +624,7 @@ class LoginResourceTest {
         // given
         String email = TestPlayers.uniqueEmail("leaver");
         String token = createAccount("Leaver", email);
+        int sentBefore = mailbox.getTotalMessagesSent();
 
         // when
         ExtractableResponse<Response> response = given().cookie(TestPlayers.COOKIE, token)
@@ -554,6 +632,7 @@ class LoginResourceTest {
 
         // then
         assertThat(response.statusCode(), equalTo(204));
+        assertThat(mailbox.getTotalMessagesSent(), equalTo(sentBefore));
         assertThat(response.header("Set-Cookie"), equalTo(CLEARED_COOKIE));
         assertThat(TestSql.count(dataSource, "select count(*) from session where token_hash = ?", Sessions.hash(token)),
                 equalTo(0L));
@@ -613,6 +692,35 @@ class LoginResourceTest {
     private UUID playerId(String token) throws SQLException {
         return (UUID) TestSql.row(dataSource, "select player_id from session where token_hash = ?",
                 Sessions.hash(token)).getFirst();
+    }
+
+    private long codeRowsFor(String email) throws SQLException {
+        return TestSql.count(dataSource, "select count(*) from login_code where email_hash = ?", Sessions.hash(email));
+    }
+
+    private void seedExpiredCode(String email) throws SQLException {
+        TestSql.execute(dataSource, """
+                insert into login_code (email_hash, code_hash, attempts, expires_at, created_at)
+                values (?, 'stale', 0, now() - interval '1 second', now() - interval '601 seconds')
+                """, Sessions.hash(email));
+    }
+
+    // Every table, so a table added later is checked too. position(), not
+    // like, because _ in an address is a like wildcard.
+    private List<String> tablesHolding(String text) throws SQLException {
+        String tableNames = (String) TestSql.row(dataSource, """
+                select string_agg(format('%I', table_name), ',' order by table_name)
+                from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'
+                """).getFirst();
+        List<String> holding = new ArrayList<>();
+        for (String table : tableNames.split(",")) {
+            String sql = "select count(*) from " + table
+                    + " stored where position(lower(?) in lower(stored::text)) > 0";
+            if (0 < TestSql.count(dataSource, sql, text)) {
+                holding.add(table);
+            }
+        }
+        return holding;
     }
 
     private void seedSentMails(int count, String age) throws SQLException {

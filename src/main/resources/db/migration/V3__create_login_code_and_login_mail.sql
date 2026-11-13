@@ -1,7 +1,8 @@
 -- One code per email: a new request replaces the row. Rows are deleted once
--- used or expired.
+-- used or expired. Keyed by the SHA-256 of the address, so a code request
+-- never stores the address itself; only an account keeps it, in player.
 create table login_code (
-    email      text primary key,
+    email_hash text primary key,
     code_hash  text not null,
     attempts   integer not null default 0,
     expires_at timestamptz not null,

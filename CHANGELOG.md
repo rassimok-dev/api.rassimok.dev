@@ -28,13 +28,23 @@ proxy.
   refused too.
 - Code: 6 digits from `SecureRandom`, valid 10 minutes, stored as the
   SHA-256 of `email + ":" + code` in lower-case hex, compared with
-  `MessageDigest.isEqual`. A new request replaces the email's code. The code
-  must be a JSON string; a number does not match.
+  `MessageDigest.isEqual`. A new request replaces the email's code. In
+  `POST /login/verify` the code must be a JSON string of exactly 6 ASCII
+  digits; anything else (a JSON number such as `123456`, `null`, 5 or 7
+  digits, a space, Arabic-Indic or full-width digits) is `400 invalid_code`
+  and counts no attempt.
 - Limits, counted in the database: 3 codes per email per hour, 80 mails a
-  day overall. All bounds sit in `Rules`.
-- Migration `V3` adds `login_code` (one row per email: hash, attempts,
-  expiry, creation) and `login_mail`, the send log (SHA-256 of the email and
-  the send time). `V1` and `V2` are unchanged.
+  day overall. All bounds sit in `Rules`. Every valid code request, a
+  refused one too, first deletes send-log rows older than a day and expired
+  codes.
+- No table holds the address for a code request. `login_code` is keyed by
+  the SHA-256 of the normalised email (lower-case hex) and the send log
+  keeps the same hash; the address is stored only in `player.email`, when a
+  verify turns a guest into an account. The API sends no mail but the login
+  code.
+- Migration `V3` adds `login_code` (one row per email: `email_hash`, code
+  hash, attempts, expiry, creation) and `login_mail`, the send log (SHA-256
+  of the email and the send time). `V1` and `V2` are unchanged.
 - Mail: the `mailer` extension from the Quarkus BOM, SMTP to
   `smtp.resend.com:465` with TLS, user `resend`, password from
   `RESEND_SMTP_KEY` (prod only). From `КЛАД <klad@mail.rassimok.dev>`;
@@ -45,13 +55,20 @@ proxy.
   (one flag, comma-separated, as `--set-secrets` replaces the whole set).
   `api-runtime` already had access to the secret.
 - Tests: unit tests for the email check, the code hash (against a vector
-  from `shasum`), expiry, code format, the mail text and both limit windows
-  on a fixed clock. `LoginResourceTest` (with the mock mailbox) covers the
-  sent mail and what is stored, invalid emails, the replaced code, wrong
-  codes, four wrong then right, the fifth wrong, 10 parallel guesses,
-  expiry, a used code, both limits and their windows, 10 parallel code
-  requests, a guest becoming an account, a second device, an account
-  with a guest on the device, `nick_taken`, `no_session`, and logout.
+  from `shasum`), expiry, the generated code's format, the accepted code
+  (6 ASCII digits only), the mail text and both limit windows on a fixed
+  clock.
+  `LoginResourceTest` (with the mock mailbox) covers the sent mail and what
+  is stored, a scan of every table for the address after a code request
+  (none holds it) and after a verify (only `player`), invalid emails, the
+  replaced code, wrong codes, a numeric and other malformed codes (no
+  attempt counted, the right string still works), four wrong then right,
+  the fifth wrong, 10 parallel guesses, expiry, a used code, both limits
+  and their windows, old rows deleted on a refused request, 10 parallel
+  code requests, a guest becoming an account, a second device, an account
+  with a guest on the device, `nick_taken`, `no_session`, and logout; verify
+  and logout send no mail. `DatabaseMigrationTest` pins the `login_code`
+  columns and its `email_hash` key.
   `ResponseHeadersTest` has the 415 rows for both login bodies, the error
   rows, and logout with an empty chunked body and no type (204, no
   `Content-Type`). `LoginRoundTripIT` requests and verifies codes against
@@ -91,12 +108,30 @@ proxy.
   Resend answers (the blocking mailer waits up to 60 s). A failed send
   answers 500 (logged), keeps the stored code and still counts toward the
   limits, which errs on the side of the mail quota.
-- **The send log keeps a hash of the email, not the address.** The limits
-  must outlast the code rows, which are deleted once used or expired. The
-  log only needs to recognise an address again, so it stores its SHA-256,
-  and rows older than a day are deleted on each send; expired codes are
-  deleted then too. An unsalted hash still lets someone holding the table
-  test a known address; it keeps the list of addresses out of it.
+- **A code request stores hashes, never the address** (contract section 5,
+  decided 2026-11-13 after the RAS-25 review; the site's privacy note
+  promises it). An address that asks for a code and never verifies leaves
+  only hashes, which go with the next code request once they are outdated:
+  `login_code` and the send log both key on the SHA-256 of the normalised
+  address, and the code hash still binds email and code. Both only need to
+  recognise an address again, which a hash does.
+  The address is written only into `player.email`, by a verify that makes
+  an account. An unsalted hash still lets someone holding the tables test a
+  known address; it keeps the list of addresses out of them.
+- **`V3` was changed in place.** It had run only in tests (Dev Services
+  starts an empty database each time), never against Neon, so no database
+  holds the old checksum. Once it has run anywhere real, a change needs a
+  new migration.
+- **A malformed code counts no attempt.** It can never be the right code
+  and is refused before the row is read, with the same `400 invalid_code`
+  whether or not a code exists, so it reveals nothing; counting it would let
+  a broken client use up a player's five attempts.
+- **Old rows go on every code request, a refused one too.** The privacy
+  note promises that outdated records go with the next code request, and a
+  429 is one. `issue` deletes send-log rows older than a day and expired
+  codes before it counts, and `dontRollbackOn = ApiException.class` keeps
+  those deletes when the answer is 429. Nothing runs between requests, so a
+  day is not a hard bound.
 - **80 mails a day.** Resend's free plan allows 100 a day and 3,000 a month;
   80 leaves room for test mails sent by hand, and 30 days of 80 stay under
   the monthly cap.

@@ -63,6 +63,29 @@ class LoginCodesTest {
         assertThat(Set.copyOf(codes).size(), greaterThan(1900));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"012345", "000000", "999999"})
+    void shouldAccept_whenIsCode_givenSixAsciiDigits(String code) {
+        // when
+        boolean isCode = LoginCodes.isCode(code);
+
+        // then
+        assertThat(isCode, equalTo(true));
+    }
+
+    // Arabic-Indic and full-width digits are digits to Character.isDigit.
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"12345", "1234567", " 012345", "012345 ", "01234a", "012 345", "-12345", "012345\n",
+            "\u0660\u0661\u0662\u0663\u0664\u0665", "\uff10\uff11\uff12\uff13\uff14\uff15"})
+    void shouldReject_whenIsCode_givenAnythingButSixAsciiDigits(String code) {
+        // when
+        boolean isCode = LoginCodes.isCode(code);
+
+        // then
+        assertThat(isCode, equalTo(false));
+    }
+
     @Test
     void shouldAccept_whenIsCorrect_givenRightCode() {
         // given
@@ -231,7 +254,7 @@ class LoginCodesTest {
 
     private static LoginCode loginCode(Instant expiresAt) {
         LoginCode loginCode = new LoginCode();
-        loginCode.email = EMAIL;
+        loginCode.emailHash = EMAIL_HASH;
         loginCode.codeHash = CODE_HASH;
         loginCode.expiresAt = expiresAt;
         loginCode.createdAt = expiresAt.minus(Rules.CODE_LIFETIME);

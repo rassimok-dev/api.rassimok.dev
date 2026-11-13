@@ -11,6 +11,7 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.List;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class LoginCodes {
@@ -22,6 +23,7 @@ public class LoginCodes {
             Код действует %d минут. Если вы не запрашивали код, просто удалите это письмо.
             """;
     private static final int CODE_BOUND = 1_000_000;
+    private static final Pattern CODE = Pattern.compile("[0-9]{6}");
 
     // An instance field, not a static one, so it is seeded when the service
     // starts and not when the native image is built.
@@ -29,22 +31,23 @@ public class LoginCodes {
 
     // Up to three instances serve requests. The table lock makes code
     // requests count one after another, so a burst cannot slip past the
-    // limits, and the per-email replace never races.
-    @Transactional
+    // limits, and the per-email replace never races. Old rows are deleted on
+    // every request; dontRollbackOn keeps that when the answer is 429.
+    @Transactional(dontRollbackOn = ApiException.class)
     String issue(String email, Instant now) {
         LoginMail.getEntityManager().createNativeQuery("lock table login_mail in exclusive mode").executeUpdate();
-        String emailHash = Sessions.hash(email);
         Instant dayAgo = now.minus(Rules.MAILS_PER_DAY_WINDOW);
+        LoginMail.delete("sentAt <= ?1", dayAgo);
+        LoginCode.delete("expiresAt <= ?1", now);
+        String emailHash = Sessions.hash(email);
         if (!canSend(LoginMail.list("sentAt > ?1", dayAgo), emailHash, now)) {
             throw new ApiException(Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
         }
-        LoginMail.delete("sentAt <= ?1", dayAgo);
-        LoginCode.delete("expiresAt <= ?1", now);
         String code = newCode();
-        LoginCode loginCode = LoginCode.findById(email);
+        LoginCode loginCode = LoginCode.findById(emailHash);
         if (null == loginCode) {
             loginCode = new LoginCode();
-            loginCode.email = email;
+            loginCode.emailHash = emailHash;
         }
         loginCode.codeHash = hash(email, code);
         loginCode.attempts = 0;
@@ -59,9 +62,13 @@ public class LoginCodes {
     }
 
     // Runs in the caller's transaction, which must not roll back when this
-    // throws.
+    // throws. A code that is not 6 digits can never be right, so it is
+    // refused without reading the row or counting an attempt.
     static void consume(String email, String code, Instant now) {
-        LoginCode loginCode = Emails.isValid(email) ? LoginCode.findById(email, LockModeType.PESSIMISTIC_WRITE) : null;
+        boolean isWellFormed = Emails.isValid(email) && isCode(code);
+        LoginCode loginCode = isWellFormed
+                ? LoginCode.findById(Sessions.hash(email), LockModeType.PESSIMISTIC_WRITE)
+                : null;
         if (null == loginCode) {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_CODE);
         }
@@ -78,6 +85,10 @@ public class LoginCodes {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_CODE);
         }
         loginCode.delete();
+    }
+
+    static boolean isCode(String code) {
+        return null != code && CODE.matcher(code).matches();
     }
 
     String newCode() {
