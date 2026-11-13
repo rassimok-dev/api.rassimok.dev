@@ -48,8 +48,10 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build native executable
-        run: ./mvnw -B package -Dnative -DskipTests
+      # verify, not package: the native integration tests run against the
+      # binary (with a Dev Services database) before any image is pushed.
+      - name: Build and test native executable
+        run: ./mvnw -B verify -Dnative
 
       - name: Build and push image
         run: |
@@ -66,9 +68,32 @@ jobs:
             --region "${REGION}" \
             --platform managed \
             --allow-unauthenticated \
+            --service-account api-runtime@rassimok-dev.iam.gserviceaccount.com \
+            --set-secrets KLAD_DB_URL=klad-db-url:latest \
             --max-instances 3 \
             --min-instances 0 \
             --memory 256Mi \
             --cpu 1 \
             --port 8080 \
             --quiet
+
+      # Readiness must show the database answering, and the site's /klad/api
+      # proxy must reach this service. The body is checked as well because
+      # Pages answers unknown paths with the home page and a 200.
+      # Retries cover cold starts.
+      - name: Smoke test
+        run: |
+          check() {
+            for attempt in 1 2 3 4 5; do
+              status=$(curl -s -o smoke-body.txt -w '%{http_code}' --max-time 30 "$1" || true)
+              echo "$1 -> HTTP $status (attempt $attempt)"
+              if [ "$status" = "200" ] && grep -Eq "$2" smoke-body.txt; then
+                return 0
+              fi
+              sleep 10
+            done
+            echo "$1 did not answer 200 with a body matching $2"
+            return 1
+          }
+          check https://api.rassimok.dev/q/health/ready '"<default>": *"UP"'
+          check https://rassimok.dev/klad/api/status '"service": *"api.rassimok.dev"'
