@@ -3,6 +3,411 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-13 (seventh) - WebSocket echo spike at /race/echo
+
+A spike for the ghost race: it shows that the API can serve a WebSocket in
+the native image, read the player from the session cookie and refuse a
+foreign Origin. The endpoint only echoes. It stays until the user approves
+its removal; the PR that makes it obsolete lists it for deletion.
+
+- Built on Vert.x core's `ServerWebSocket` (vertx-core 4.5.33, already in
+  the build through `quarkus-vertx-http`); no new dependency.
+  `RaceEchoSocket` registers `GET /race/echo` on the Quarkus `Router`
+  (`@Observes Router`). A request without `Upgrade: websocket` goes on to
+  REST and gets the usual 404.
+- `/race/echo` answers each text message with the same text. The game will
+  reach it as `wss://rassimok.dev/klad/api/race/echo` through the site's
+  proxy, so the browser sends the `klad_session` cookie (`Path=/klad/api`).
+  Passing the upgrade through the Pages Function is a separate site ticket.
+- `/race/echo` goes through `WebSocketHandshakeCheck`, and every later
+  WebSocket route must too. Nothing enforces that: a route that calls
+  `toWebSocket()` itself gets none of the checks. In this order: a
+  handshake with a body (any `Transfer-Encoding`, or a `Content-Length`
+  other than 0) gets 400; a `Sec-WebSocket-Version` other than 13, or none,
+  gets 426 with `Sec-WebSocket-Version: 13`; a full instance gets 503; an
+  `Origin` other than exactly `klad.websocket.allowed-origin`
+  (`https://rassimok.dev`), or no `Origin` at all, gets 403; a missing,
+  unknown or expired session gets 401, through the existing session lookup
+  (`Sessions.isSignedIn`). Before all of these, a handshake on a connection
+  that already holds a slot gets no answer at all (see the cap, below). A
+  refused handshake carries the three security
+  headers but no body; browsers show neither to the page.
+- Every socket starts paused and reads one frame at a time (flow control,
+  below).
+- A text message over 512 UTF-8 bytes (`Rules.SOCKET_MESSAGE_BYTES_MAX`)
+  closes the socket with code 1008 (policy violation).
+- At most 20 sockets are open at once on one instance
+  (`Rules.SOCKETS_OPEN_MAX`); the next handshake gets 503. A slot is taken
+  at the start of a handshake and belongs to its TCP connection (below).
+- Replies and closes are never awaited (`SocketSender`). A socket with 8
+  unfinished sends (`Rules.SOCKET_UNFINISHED_SENDS_MAX`) is closed with
+  1008 (`not_reading`) and its TCP connection dropped at once.
+- A ping frame drops the TCP connection, and so does any error on the
+  connection: a frame or a message over 4096 bytes, for example. Neither
+  logs anything.
+- A handshake whose client has gone by the end of its session lookup is
+  refused instead of upgraded.
+- Tests: `WebSocketHandshakeCheckTest` (unit) covers the Origin rule
+  (scheme, case, trailing slash, port, subdomains, `null`, none) and
+  `OpenSocketsTest` the cap. `RaceEchoSocketTest` uses a real Vert.x
+  WebSocket client to cover the echo, the 512-byte boundary in two-byte
+  letters, the 1008 close, a burst of 200 messages, a client that stops
+  reading (dropped while it pauses), a frame over 4096 bytes, a message in
+  two fragments (echoed), a fragmented message over 4096 bytes (dropped),
+  a client offering either kind of compression, the socket cap under 40
+  handshakes at once, no cookie, an unknown and an expired cookie, a
+  foreign Origin (also without a cookie, so the Origin is checked first),
+  a missing Origin, the headers on a 401 and a 403, and a plain GET (404).
+  With a plain TCP socket it covers:
+  - 10,000 empty text frames in one write: the replies come in order, all
+    of them or up to the drop for not reading (see below), and a new
+    socket echoes meanwhile;
+  - 10,000 pings in one write: dropped;
+  - a client that pings and never reads (dropped), and the same after the
+    server's 1008 for a long message (it must drop within 5 s, because
+    Vert.x's closing timeout cuts it after 10 s anyway);
+  - 40 handshakes abandoned during the lookup;
+  - 40 handshakes with a chunked body of 9,000 bytes, and 40 with a 5-byte
+    body and its `Content-Length`: each gets 400; 40 with
+    `Content-Length: 0` get 101;
+  - 40 handshakes without `Sec-WebSocket-Version` and `Sec-WebSocket-Key`
+    (draft 75/76), and 40 of version 8: 426 with
+    `Sec-WebSocket-Version: 13`;
+  - 40 connections that each send two upgrade requests in one write, read
+    the 101 and close 500 ms later;
+  - a handshake refused for a foreign Origin, or for an unknown session,
+    with a valid one behind it in the same write: the refusal, then 101.
+  For each way a socket ends (client close, 1008, not reading, oversized
+  frame, ping) it ends 20 sockets in a row; the same after 40 handshakes
+  refused for a foreign Origin and 40 refused for no session. Each of these
+  cases, and each item of the list above, ends by opening 20 sockets at
+  once and keeping them open: with one slot lost, a single new socket
+  would still find room. It expires a session through plain JDBC on the
+  Dev Services database (`DevServicesContext`), so `RaceEchoSocketIT` runs
+  the same cases against the native binary.
+  `AbandonedHandshakeLogTest` (JVM only, it reads the log) checks that the
+  40 abandoned handshakes log no warning or error, and neither do 40 pairs
+  of upgrade requests in one write, each closed once its 101 is read.
+
+### Decisions worth not relitigating
+
+- **Vert.x core, not websockets-next.** The first build of this spike used
+  `quarkus-websockets-next` (3.39.3). Its third security review measured
+  the native binary under a 256 MB limit, run out of memory by a burst of
+  tiny frames: 2 MB of empty text frames on one socket, or 128 KB of empty
+  pings on each of 20 sockets. websockets-next queues one event-loop task
+  per incoming text message and per ping, with no limit, and nothing stops
+  reading while the tasks pile up; it has no per-connection pause or
+  demand. Vert.x core's `ServerWebSocket` is a `ReadStream` with `pause`
+  and `fetch`, so the server decides when the next frame is read. The
+  extension and its keys are gone. Text frames still need no codec, and
+  so no reflection setup in the native image; the race protocol will
+  parse its JSON text frames itself with Vert.x `JsonObject`.
+- **Flow control.** Read in the Vert.x 4.5.33 and Netty 4.1.137 sources:
+  - `WebSocketHandshakeCheck` pauses the socket in the same event-loop task
+    as the upgrade, sets the frame handler and fetches one frame. Vert.x
+    calls the frame handler after the endpoint's message handler; for a
+    text, binary or continuation frame it fetches the next one, in a later
+    event-loop task. So a frame is handled and its reply's send started
+    before the next one is read.
+  - Not at once: fetched inside the handler, Vert.x hands over the next
+    frame inside the same read, which runs through every byte read (up to
+    16 reads of 64 KiB), and no reply is flushed before the read ends. Each
+    reply then counts as unfinished, so a reading client sending 9
+    messages at once would be dropped as not reading.
+  - While a socket waits, Vert.x queues its frames (`InboundBuffer`). From
+    16 queued frames on it stops reading the TCP connection (`autoRead`
+    off), and the client's further frames wait in TCP. Netty still decodes
+    the rest of the chunk already read, up to 64 KiB, so one socket holds at
+    most about one chunk of frames: some 11,000 empty frames, or 16 of 4096
+    bytes. With 20 sockets that is about 220,000 queued frames at worst,
+    and it does not grow; before, each read pass of one socket (up to 1 MiB)
+    queued another 175,000 tasks. These counts hold for version 13 frames,
+    which a client must mask, so an empty one is 6 bytes. Only version 13 is
+    accepted (below).
+  - Pings: Vert.x writes the pong for a ping as soon as it is decoded,
+    before queueing it and whether the socket is paused or not
+    (`WebSocketImplBase.handleFrame`), and fetches by itself after handing
+    a ping or a pong to the frame handler (`receiveFrame`). So the frame
+    handler fetches only after data frames; fetching after a pong too
+    would add up demand. The pongs written before the drop are bounded by
+    the same chunk. A client's pong gets no reply and costs nothing.
+  - The frame handler keeps fetching after the server's own 1008, so a
+    later ping still reaches the drop.
+- **Measured on the native binary.** Setup: `--memory 256m --memory-swap
+  256m --cpus 1`, a throwaway `postgres:18`, the third review's raw-socket
+  client in a second container, every frame empty (6 bytes), each row on
+  a fresh container. The server was watched until it went idle, and
+  `anon` and `sock` were sampled every second. Sizes are in MiB, like the
+  limit. At idle the server held about 95 MiB `memory.peak`, of which
+  20 MiB was `anon`; the rest is mostly the page cache of the 87 MiB
+  binary. With websockets-next, 5 of the review's first 7 rows were killed
+  for lack of memory. Now every row survived, and the server logged
+  nothing at WARN or above. `/status` answered in 1 to 2 ms while 20
+  reading sockets kept the server busy.
+
+  | Burst | Peak (MiB) | What happened |
+  |---|---|---|
+  | 1 socket, 1 MiB of pings | 115 | dropped at the first ping |
+  | 1 socket, 1 MiB of text, not reading | 142 | every frame answered; 0.33 MiB of replies wait in kernel buffers, socket kept |
+  | 1 socket, 2 MiB of text, not reading | 145 | the same, 0.67 MiB of replies |
+  | 1 socket, 2 MiB of text, reading | 143 | dropped after 142,000 echoes |
+  | 20 sockets, 128 KiB of pings each | 114 | all dropped |
+  | 20 sockets, 1 MiB of pings each | 115 | all dropped |
+  | 20 sockets, 1 MiB of text each, not reading | 153 | all dropped |
+  | 20 sockets, 1 MiB of text each, reading, 2 runs | 206, 200 | `anon` at most 105 and 99; every echo in one run (46 s of full CPU), 3 sockets dropped in the other |
+  | 20 sockets, 3 MiB of text each, reading, 2 runs | 226, 220 | `anon` at most 124 and 102; every echo, about 140 s of full CPU |
+  | 20 sockets, 0.5 MiB of text then 0.5 MiB of pings, not reading | 153 | all dropped |
+  | the same, reading | 215 | derived from the byte count: every text frame echoed, about 1,700 pongs per socket, then no more |
+
+  - The worst peak, 226 MiB, leaves 30 MiB of the 256. The reading rows
+    peak highest, because a reading client keeps the server busy the
+    longest; `sock` stayed at about 17 MiB in those rows.
+  - The GC log of one 3 MiB row shows the heap after each collection
+    between 31 and 70 MiB, with no upward trend over 140 s; the heap before
+    collection reached 109 MiB. So the 3 MiB rows ask for more headroom,
+    not more retained memory. Floods longer than 140 s were not measured.
+  - A temporary build that logged each drop showed why one reading socket
+    is dropped: not reading (8 unfinished sends), because the native
+    server answers faster than the network takes 2-byte replies. Over
+    several runs that came after between 1,200 and 230,000 echoes. The
+    other drops in the table were not traced to a cause.
+  - Messages of a real size do not get there: 20 runs of 200 messages of
+    512 bytes from a reading client in another container, and 20 runs of
+    1,000, were echoed in full every time.
+  - A flood keeps the instance's one CPU busy for as long as it lasts.
+- **The Origin rule exists because WebSockets have no CORS.** A browser
+  opens a socket to any server from any page, and the server alone decides
+  whether to accept it. `SameSite=Strict` already keeps the cookie off
+  sockets that other sites open, but it trusts every page on the same site.
+  The exact Origin also refuses pages on other rassimok.dev subdomains. A
+  non-browser client can send any Origin; the check protects players in
+  browsers, which is its job. The Origin is checked before the session, so
+  a foreign page never causes a database read.
+- **Only version 13 handshakes, without a body.** The fourth security
+  review found the server also accepting the draft 75/76 handshake (no
+  `Sec-WebSocket-Version`). Its frames are unmasked, so an empty one is 2
+  bytes, and one 64 KiB read queued about 32,700 frames per socket instead
+  of 11,000; 20 reading sockets took a 256 MiB container to its limit,
+  where only reclaimed page cache kept it alive. Browsers send version 13,
+  and so must the Workers runtime behind the site's proxy (assumed, not
+  tested), so anything else gets 426 like Vert.x's own answer for an
+  unknown version. A WebSocket handshake carries no body and browsers send
+  none; why one is refused is under the socket cap below.
+- **The body and the version come first, then the cap, then the Origin,
+  then the session.** The first two take no slot. On a full instance every
+  other handshake gets 503, whatever its Origin. All of these but the
+  session are checked on the event loop, so neither a full instance nor a
+  foreign page takes a worker thread.
+- **The allowed Origin is a config value** (`klad.websocket.allowed-origin`
+  in `application.properties`). The JVM tests and the native test send the
+  production value, so the binary is shown to carry it; the unit test uses
+  its own.
+- **The session lookup runs on a worker thread.** The route runs on the
+  event loop, where a JDBC call must not block. The check hands the lookup
+  to the Vert.x context's `executeBlocking`, whose result comes back on the
+  event loop, where the upgrade happens. `Sessions.isSignedIn` is
+  `@Transactional`, because that worker thread has no request context;
+  `POST /players` already calls it inside a transaction and is unchanged.
+  Quarkus pauses every request before routing, so the request is still
+  unread when the upgrade runs after the lookup; `toWebSocket()` throws,
+  instead of failing its future, only for a request already read.
+- **The handshake does not move the session's expiry.** The REST calls
+  refresh it at most once a day, and a race lasts at most 4 minutes.
+- **512 bytes is checked in the endpoint, not only by the frame size
+  limit.** Measured with websockets-next, on the same Vert.x server: at a
+  frame limit of 512, a larger frame drops the TCP connection without a
+  close frame, so the client sees no code. `max-frame-size` and
+  `max-message-size` (`quarkus.http.websocket-server.*`) are set to 4096
+  instead, only to cap the memory one socket can take. A frame over 4096
+  still ends that way, which only a hand-made client can cause
+  (`RaceEchoSocketTest` sends one of 5000 bytes).
+- **Compression is off.** Measured with websockets-next and
+  permessage-deflate on: the limits
+  count compressed bytes, and a frame well under 4096 was inflated to
+  64 KB before the message limit refused it. The ratio can reach about
+  1000 to 1. Messages of at most 512 bytes gain nothing from compression.
+  Vert.x accepts permessage-deflate and the older per-frame deflate by
+  default, and Quarkus has no key for either, so `WebSocketCompressionOff`
+  (an `HttpServerOptionsCustomizer`) turns both off on the HTTP, HTTPS and
+  domain-socket servers; the websockets-next key had turned off only the
+  first. A client that offers either, as browsers do with the first, gets
+  plain frames; `RaceEchoSocketTest` checks that the handshake answer
+  carries no `Sec-WebSocket-Extensions`. That test does not pin the class:
+  while `vertx.disableWebsockets` is set (below), Vert.x installs no
+  extension handler anyway (`HttpServerConnectionHandler`, read in 4.5.33).
+  What the class changes today is that the frame decoder treats a frame
+  with an extension bit set as a protocol error; it also keeps compression
+  off if a later extension clears the property.
+- **`vertx.disableWebsockets` does not matter.** Without a WebSocket
+  extension, Quarkus sets this Vert.x property. Read in the 4.5.33 code, it
+  only skips Vert.x's own upgrade dispatch and the compression handlers;
+  `HttpServerRequest.toWebSocket()` does not read it. Vert.x reads it once
+  into a static field, so the native test is what shows that the binary
+  upgrades.
+- **At most 20 open sockets per instance.** On Cloud Run each open socket
+  holds one of the instance's concurrent request slots until it closes.
+  Without a cap, one free guest cookie and a few hundred idle sockets would
+  take every slot, and REST would fail for every player. 20 keeps most of
+  the slots free, assuming Cloud Run's default concurrency of 80, which
+  `deploy.yml` does not change.
+  - **A slot belongs to a TCP connection and comes back exactly once:** at
+    a refusal, or when its socket or its connection closes, whichever comes
+    first. The slot is taken after the body and version checks and before
+    the Origin check, so handshakes sent at once cannot all find room while
+    their lookups run. `WebSocketHandshakeCheck` records the connection in
+    the same step (`takeSlot`), and every path gives the slot back through
+    one helper that does so only while the connection still holds it
+    (`giveBackSlot`): the 403, the 401, the 499, a failed lookup, a failed
+    upgrade, the socket's close handler and the connection's close.
+  - The connection's close is the backstop, for any path that ends in no
+    refusal and no socket. Three reviews each found such a path, and each
+    had been patched where it was found:
+    - a client that left during its session lookup (second review);
+    - a handshake with a chunked body over 8192 bytes: Vert.x answers 413
+      and closes the connection without completing or failing the
+      upgrade. Quarkus's 4K body limit checks only `Content-Length`, so
+      the fourth review locked a native instance at 503 for every socket
+      with 20 such handshakes of 9,000 bytes;
+    - a second upgrade request right behind the first, in the same write.
+      Vert.x routed it inside the first one's upgrade, its `toWebSocket()`
+      handed over the same socket, and its close handler replaced the
+      first one, so one close gave back one slot for two. The fifth review
+      left a native instance with 1 slot of 20 after 20 such connections,
+      with nothing logged; closed at once instead, a few pairs logged
+      "Result is already complete" errors.
+  - The backstop listens on `ConnectionBase.closeFuture()`, through the
+    same `impl` cast as the drop (below). `HttpConnection.closeHandler`
+    holds one handler, and Quarkus sets it when
+    `quarkus.http.limits.max-connections` is set (`VertxHttpRecorder`, read
+    in 3.39.3), so taking it would break that count; the close future takes
+    any number of listeners. A connection stays recorded, without its slot,
+    until it closes, so it gets one listener however many handshakes it
+    sends: a refusal leaves a connection open for its next request, and
+    Cloud Run's front end may reuse its connections (assumed).
+  - A connection holds one slot at most. A handshake on a connection that
+    holds one is neither upgraded nor answered: Vert.x holds back a request
+    sent right behind another until that one's answer is complete, so it
+    normally reaches the check only once the connection speaks WebSocket,
+    where no HTTP answer fits. Our refusals give the slot back before they
+    end their response, because ending it routes the request queued behind
+    it at once. Vert.x's own refusals after the lookup (400 for a
+    `Connection` header without `upgrade`, or for a missing key) end their
+    response before the upgrade fails, so a request queued behind one of
+    them gets no answer; no slot is lost (measured on the native binary in
+    the sixth review: 400, then no answer, the cap whole). Two upgrades in
+    one write are not reachable through the site's proxy, which opens one
+    connection per upgrade; at the run.app URL it depends on Google's front
+    end (not tested).
+  - Checked by mutation in the JVM tests. With the body refusal turned
+    off, 40 chunked handshakes of 9,000 bytes got 413, and then 20 sockets
+    opened at once; on the code before the backstop, the same left the
+    instance at 503. With the socket's close handler giving nothing back,
+    every socket test still passed, through the connection's close; with
+    the backstop removed as well, the churn tests failed with 503.
+  - Repeated on the native binary, set up as in the measurement above,
+    each on a fresh container: 25 chunked handshakes of 9,000 bytes (400
+    each); 20 connections with two upgrades in one write, held 500 ms and
+    closed; 25 such pairs read and closed at once; 20 reading sockets with
+    3 MiB of empty frames each (peak 215 MiB, not killed). Nothing was
+    logged at WARN or above, and after each, 25 handshakes at once got 20
+    times 101 and 5 times 503.
+  - A handshake with a body is still refused, before it takes a slot:
+    Vert.x would read up to 8192 bytes of it into memory first.
+  - The cap bounds the session lookups only while their clients stay
+    connected: at most 20 run at a time. A client that leaves during its
+    lookup gets its slot back at its close, and the lookup still runs. The
+    REST endpoints have no bound on their database reads either.
+  - Accepted, not solved: the cap protects REST capacity, not the bill.
+    One open socket keeps an instance busy and billed; `--max-instances`
+    and the budget alert bound that cost.
+  - A socket closed for a long message while its client does not read is
+    cut by Vert.x 10 s after its close frame is written (the closing
+    timeout; measured with websockets-next). If unread replies hold that
+    frame back, the timeout never starts (read in the Vert.x 4.5 code, not
+    measured), and the socket stays up until the client or Cloud Run's
+    request timeout ends it. The server sends it nothing more, and the cap
+    counts it until then. A socket closed for not reading, or sent a ping,
+    is dropped at once and frees its slot.
+- **Sends are not awaited.** An echo that waited for its send would stall
+  once the client stopped reading, and the socket would keep its slot.
+  Each message is handled as it arrives, and after 8 unfinished sends the
+  socket is closed and dropped, so Netty holds at most 8 unsent replies
+  per socket. The kernel's socket buffers hold more for a client that does
+  not read (0.3 to 0.6 MiB measured), and they count in the instance's
+  memory. A client that reads about as fast as it sends stays far below
+  8: a burst of 200 or 1,000 messages of 512 bytes is echoed in full. A
+  client that floods tiny
+  frames faster than the network takes the 2-byte replies is dropped like
+  one that does not read: measured on the native binary, one reading
+  socket was dropped after between 1,200 and 230,000 echoes, depending on
+  the run. The race protocol sends through `SocketSender` too.
+- **A client that does not read is dropped, not only closed.** Vert.x
+  closes the TCP connection only once its close frame is written, and the
+  1008 waits behind the replies the client does not read, so it would
+  never arrive and the socket would keep its slot until Cloud Run's
+  timeout. The 1008 is still sent first, but the client is not sure to
+  get it; the tests check only that the connection ends.
+- **A ping drops the connection.** Vert.x answers every ping with a pong,
+  even after the server's close, so a client that pings and does not read
+  would make the server queue pongs; without the drop, a plain TCP client
+  kept its connection through 10 s of pings. Browsers cannot send pings,
+  so no player is affected. Assumed, not measured: neither Cloud Run's
+  front end nor the site's proxy sends pings of its own. If one does,
+  every socket through it ends at its first ping.
+- **Errors drop the socket and log nothing.** Vert.x logs an ERROR for
+  every connection error without a handler; websockets-next logged two,
+  one with a stack trace, for each frame over 4096 bytes, a cost in Cloud
+  Logging that any client could cause. The socket's exception handler now
+  drops the connection instead. That also ends a fragmented message over
+  4096 bytes, which Vert.x reports without closing the socket.
+- **How the drop is done.** In Vert.x 4.5 `HttpConnection.close()` and
+  Netty's `Channel.close()` both turn into the WebSocket close and wait
+  for its frame. `SocketSender.drop` calls
+  `ConnectionBase.channelHandlerContext().close()`, the call Vert.x makes
+  itself once the frame is out. The socket's own connection is not public
+  API, and Vert.x Web wraps the socket, so `SocketSender` keeps the
+  handshake request's connection. `ConnectionBase` is a Vert.x `impl`
+  class, and the slot backstop uses it too (`closeFuture()`); an upgrade
+  that changes it breaks the build, the ping and not-reading tests, or the
+  tests that open the whole cap.
+- **An endpoint cannot undo the guards.** It hands
+  `WebSocketHandshakeCheck.upgrade` a text callback and gets each text
+  message with the socket's `SocketSender`, never the socket. So it cannot
+  replace the close, exception or frame handler, or resume the socket. Left
+  for the race protocol, which needs them and can test them: a close
+  callback, and dropping a socket whose callback throws (Vert.x logs such
+  an exception as an ERROR, once per message). Left for it too: the
+  refusal, ping, burst and churn tests parameterised by socket path, so
+  they run for every path.
+- **A client gone during the session lookup is refused.** Measured with
+  websockets-next: the close lands inside the lookup, and the upgrade then
+  threw "Request has already been read" and logged an ERROR with a stack
+  trace, once per abandoned handshake. The check now refuses such a
+  handshake (499, never sent, because the client has gone) just before the
+  upgrade, which logs nothing; its slot came back at the close. The
+  handshake itself runs one event-loop task after `toWebSocket()`; a close
+  in that gap fails the upgrade, and Vert.x 4.5 then logs one ERROR with a
+  stack trace ("Result is already complete", from its own
+  `createWebSocket`; about 3 in 100 handshakes abandoned in a concurrent
+  burst, measured in the sixth review). No slot is lost. The line comes
+  from inside Vert.x and cannot be removed from the endpoint; RAS-32 may
+  try a no-op exception handler after `toWebSocket()`.
+- **Session lookups in flight are not bounded by the cap.** A handshake
+  abandoned during its lookup gets its slot back when its connection
+  closes, while the lookup still runs. The sixth review flooded a 256 MiB
+  native instance with about 4,200 abandoned handshakes a second from a
+  raw client and killed it for lack of memory in about 15 s. The review
+  rated it minor: it is the same class as a flood of any REST request with a
+  cookie; at the run.app URL any client can send the expected `Origin`,
+  and through the site's proxy each attempt is a metered Workers request;
+  `--max-instances 3` bounds the cost.
+  RAS-32 may hold the slot until the lookup returns, which caps lookups at
+  20 at a time.
+- **The Cloud Run idle timeout was not measured.** That optional check needs a
+  deploy. The race cap of 4 minutes keeps a socket inside the default
+  5-minute request timeout, so `deploy.yml` is unchanged.
+
 ## 2026-11-13 (sixth) - Nick keys compare lookalike letters
 
 A nick written in Cyrillic letters that look like Latin letters or digits,
