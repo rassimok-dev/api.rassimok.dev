@@ -16,6 +16,14 @@ class ApiException extends RuntimeException {
     static final String INVALID_CODE = "invalid_code";
     static final String TOO_MANY_ATTEMPTS = "too_many_attempts";
     static final String NICK_TAKEN = "nick_taken";
+    static final String NOT_FOUND = "not_found";
+    static final String ROOM_FULL = "room_full";
+    static final String NOT_IN_LOBBY = "not_in_lobby";
+    static final String NOT_HOST = "not_host";
+    static final String NOT_READY = "not_ready";
+    static final String INVALID_READY = "invalid_ready";
+    static final String INVALID_LEVEL = "invalid_level";
+    static final String INVALID_SHAPE = "invalid_shape";
 
     private final Response.Status status;
     private final String code;

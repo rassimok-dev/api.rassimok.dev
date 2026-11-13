@@ -23,6 +23,11 @@ final class JsonFields {
         return null != value && value.isTextual() ? value.textValue() : null;
     }
 
+    static Boolean booleanValue(JsonNode body, String name) {
+        JsonNode value = null == body ? null : body.get(name);
+        return null != value && value.isBoolean() ? value.booleanValue() : null;
+    }
+
     static boolean hasField(JsonNode body, String name) {
         return null != body && body.has(name);
     }

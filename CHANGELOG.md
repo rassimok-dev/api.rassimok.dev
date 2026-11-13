@@ -3,6 +3,154 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-13 (eighth) - Presence and rooms in memory, one instance
+
+Players can see who is online and gather in a room of up to four before a
+race (RAS-31, contract section 7). It is all plain REST, polled by the
+lobby; the WebSocket opens only when a race starts (RAS-32). Presence and
+rooms live in the memory of the one API instance, so Cloud Run now runs at
+most one.
+
+- `POST /presence` (204) is the heartbeat; `GET /presence` lists the players
+  seen by one in the last 60 s as `{"players":[{"nick","guest","kind"}]}`,
+  in the order they came online. `GET /presence` is not a heartbeat.
+- `POST /rooms` (201 `{"id"}`) opens a room with the caller as host and only
+  member, at level 1, `landscape`. The id is 10 characters of
+  `[A-Za-z0-9_-]` from `SecureRandom` (60 bits). `GET /rooms/<id>` answers
+  the room: `{"id","state","host":{"nick"},"players":[{"nick","kind","ready","host","you"}],"level","shape","size":4}`.
+  `you` is true only on the caller's own entry: nicks may repeat among
+  guests, so the game cannot tell itself apart by nick. The view is built
+  per caller inside the store lock, so no id leaves the API.
+  `POST /rooms/<id>/join`, `leave`, `ready` (`{"ready":true|false}`),
+  `level` (`{"level","shape"}`, host only) and `start` (host only, at least
+  two players, all ready; the room goes to `starting`) do the rest. Answers
+  carry nicks only, never a player id or an email.
+- Every endpoint looks up the `klad_session` cookie first, as the other
+  resources do, so without a valid session the answer is 401 `no_session`
+  whatever the room; the sliding refresh resends the cookie as elsewhere.
+  `ready` and `level` read a JSON body and get the 415 and 4 KB rules of
+  section 1; the other POSTs read no body and ignore one.
+- Room rules: a player is in one room at a time, and joining another room
+  leaves the first, but only once the new room has taken them (a full room
+  leaves the player where they were). A new `POST /rooms` closes the
+  caller's old room, even with other players in it or in `starting`; their
+  next poll gets 404. The host is the first member in join order, so when
+  the host leaves the next one takes over. In `lobby`, a member whose last
+  poll, heartbeat or own room request is older than 60 s is removed on the
+  next access to the rooms. A room without members is removed once it has
+  been empty for more than 10 minutes.
+- Bounds, so memory cannot grow without limit: 100 rooms (`POST /rooms`
+  beyond that is 429 `rate_limited`), 1,000 presence entries (a new
+  player's heartbeat beyond that is 429; a known player's is not), 4
+  players a room (409 `room_full`). Reasoned, not measured: a presence
+  entry is a few hundred bytes and a full room about a kilobyte, so both
+  stores at their caps stay under 1 MB of the 256 MB.
+- Cleanup is lazy: every request to a store first drops what has expired
+  there (old presence entries; silent lobby members and old empty rooms,
+  across all rooms). There is no scheduler and no new dependency. Every
+  time rule reads a `java.time.Clock` that the unit tests replace with a
+  fake one.
+- `PresenceStore` and `RoomStore` are `@Singleton` beans, each with one
+  lock (`synchronized`) around every operation, and no database call inside
+  it. `Room` holds one room's lobby and is used only under the store's
+  lock; RAS-32 adds the race to it and moves `starting` on to `racing` and
+  back to `lobby`.
+- `deploy.yml`: `--max-instances 1` (was 3; approved in plan 3.7), nothing
+  else. `--min-instances 0` stays, and there is no `--timeout`: the default
+  300 s covers a race socket, which opens only for the race (user decision).
+- Tests:
+  - Unit, with a fake clock: `PresenceStoreTest` (60 s on both sides, the
+    count from the last heartbeat, order, rename, two guests with one nick,
+    the cap for new and known players, the cap freed by expired entries,
+    1,200 heartbeats from 16 threads give exactly 1,000 entries) and
+    `RoomStoreTest` (id form and distinct ids, one open room per host, also
+    an empty or `starting` one, leaving a room as a guest on create, the
+    cap, a host replacing their room at the cap, a guest left in place by a
+    refused create, rooms abandoned for 11 minutes on both sides of the
+    boundary, 150 creates at once give 100 rooms; join order, full room,
+    re-join, also in `starting`, `not_in_lobby`, one room per player and a
+    refused join that keeps the old room, 8 joins at once give 3; leave,
+    also in `starting`, host handover, the empty room's missing host; ready,
+    level and start with every host, member and state rule and an unknown
+    room; silent members at 60 s and just over, a silent host, the
+    member's own late poll, heartbeats instead of polls, `starting` keeps
+    silent members; an empty room at 10 minutes and just over).
+  - `@QuarkusTest`, with real cookies: `PresenceResourceTest` (a guest and
+    an account, written over plain JDBC, appear with `guest` and `kind`; no
+    heartbeat, no entry; two heartbeats, one entry; an expired session; the
+    cookie resent; an empty chunked body) and `RoomResourceTest` (401 for
+    all nine endpoints without and with an unknown cookie and for an
+    expired session on a real room; create, find, 404 for every room
+    endpoint, a second room by the same host; join, `room_full`, six joins at once, moving rooms;
+    `not_in_lobby` for join, ready, level and start; leave and handover;
+    ready marks and six bodies that are not a boolean; level, `not_host`,
+    six bad levels and four bad shapes; start, two `not_ready` cases and
+    `not_host`; 413 over 4 KB; a body of another type on create). Whole
+    JSON objects are compared, so an extra field fails.
+    `ResponseHeadersTest` adds the lobby 401, 405, 415 and 400 cases.
+  - `LobbyCapsTest` (JVM only) fills the stores through the beans, then
+    checks the 429 over HTTP. It has a test profile of its own, so Quarkus
+    starts a fresh application for it and the full stores never reach
+    another test class.
+  - Native: `PresenceResourceIT` and `RoomResourceIT` run the two HTTP
+    classes against the binary (JSON of nested records in the native image).
+
+### Decisions worth not relitigating
+
+- **One instance, and what it costs.** Rooms and presence are in memory,
+  so every request must reach the same instance. `--max-instances 1` is
+  also the free tier's size. Cloud Run applies the cap per revision: while
+  a deploy rolls out, the old instance can still serve next to the new one
+  (and Cloud Run may briefly exceed the cap in a sudden spike), and a room
+  made on one is unknown to the other. Every deploy, restart or scale to
+  zero loses all rooms and presence; an invite link then gives 404, which
+  the game shows as "room not found". `--min-instances 1` would keep them
+  through idle periods at the price of an always-billed instance; not done
+  (user decision). The result endpoints keep counting their rate limit in
+  the database, which outlives a restart and is shared across a rollout.
+- **Lazy cleanup, all rooms at once.** A scheduler would be a new moving
+  part and a test with a fake clock could not see it run. Sweeping every
+  room on each access is at most 100 rooms of 4 members, so the cap always
+  counts live rooms only.
+- **An abandoned room's ten minutes start when its last member counted as
+  gone** (last seen plus 60 s), not at the access that noticed it. Dated
+  from the sweep, 100 rooms abandoned in a quiet hour would refuse every
+  new room for ten more minutes after the first access.
+- **An empty room keeps its last host.** If leaving freed the host from
+  "one open room per host", one session could fill the 100 rooms by
+  creating and leaving, 200 requests, and block rooms for everyone for ten
+  minutes. So the last host's next `POST /rooms` still closes the empty
+  room. Two sessions that hand a room to each other can still pile up
+  empty rooms (about 400 requests to the cap); the cap then answers 429, as
+  the contract allows. Whoever joins an empty room becomes its host; its
+  `host` is `null` while it is empty.
+- **The sweep runs before the caller counts as seen.** A member silent for
+  over 60 s who polls again is already out and sees the room without
+  themselves; the game can join again. Otherwise a member's removal would
+  depend on whether someone else happened to poll first.
+- **Any room request by a member counts as seen**, not only the poll and
+  the heartbeat the contract names: a member who acts is present.
+- **Not in the contract, decided here:** for a player who is not in the
+  room, `ready` answers 404 `not_found` (to them it is not there), `level`
+  and `start` answer 403 `not_host`, and `leave` answers 204 and changes
+  nothing; a member joining their own room again gets 200, also when it is
+  full or in `starting`; `leave` works in every state. The body is checked
+  right after the session, before the room (400 before 404, 403 and 409),
+  as the result endpoints do.
+- **Request budget** on the shared 100,000 requests a day of the Workers
+  plan: a lobby tab outside a room sends about 240 requests an hour (a
+  heartbeat and a presence read every 30 s), inside a room about 600 (also
+  the room poll every 10 s and once after each own action), and nothing
+  outside the lobby screen. That is about 415 tab hours a day outside a
+  room or 165 inside. Each of these requests also
+  reads the session from Neon, so an open lobby keeps the database awake
+  (it suspends after 5 idle minutes).
+- **Not done here:** nothing moves a room out of `starting` yet. Until
+  RAS-32 such a room keeps its members and its place under the cap until
+  they leave or the host opens a new room. A player who deletes their nick
+  or logs out stays in the presence list and in a lobby room until the
+  60 s rules drop them.
+
 ## 2026-11-13 (seventh) - WebSocket echo spike at /race/echo
 
 A spike for the ghost race: it shows that the API can serve a WebSocket in

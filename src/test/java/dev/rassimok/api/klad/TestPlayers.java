@@ -21,6 +21,12 @@ final class TestPlayers {
         return name + "-" + UUID.randomUUID() + "@example.com";
     }
 
+    // Guests may share a nick; a unique one lets a test find its own player
+    // in a list that other tests fill too. The prefix has at most 8 letters.
+    static String uniqueNick(String prefix) {
+        return prefix + UUID.randomUUID().toString().substring(0, 8);
+    }
+
     static String createGuest(String nick, String kind) {
         return given()
                 .contentType(ContentType.JSON)
