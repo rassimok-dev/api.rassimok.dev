@@ -34,7 +34,7 @@ final class TestPlayers {
     static void insertAccount(Connection connection, String nick, String email) throws SQLException {
         TestSql.execute(connection, """
                 insert into player (id, nick, nick_key, kind, email, created_at, last_seen_at)
-                values (gen_random_uuid(), ?, lower(?), 'human', ?, now(), now())
-                """, nick, nick, email);
+                values (gen_random_uuid(), ?, ?, 'human', ?, now(), now())
+                """, nick, Nicks.key(nick), email);
     }
 }

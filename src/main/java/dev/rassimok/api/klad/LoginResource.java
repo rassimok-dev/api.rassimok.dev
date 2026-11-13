@@ -136,9 +136,13 @@ public class LoginResource {
         if (!isGuest) {
             throw new ApiException(Response.Status.UNAUTHORIZED, ApiException.NO_SESSION);
         }
-        if (Player.isNickKeyTaken(devicePlayer.nickKey, devicePlayer.id)) {
+        // Computed again, not read: a guest written by an older revision can
+        // still hold a key without the lookalike map.
+        String nickKey = Nicks.key(devicePlayer.nick);
+        if (Player.isNickKeyTaken(nickKey, devicePlayer.id)) {
             throw new ApiException(Response.Status.CONFLICT, ApiException.NICK_TAKEN);
         }
+        devicePlayer.nickKey = nickKey;
         devicePlayer.email = email;
         Player.flushNickKey();
         return devicePlayer;

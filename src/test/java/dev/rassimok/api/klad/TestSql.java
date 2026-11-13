@@ -28,9 +28,14 @@ final class TestSql {
     }
 
     static List<Object> row(DataSource dataSource, String sql, Object... parameters) throws SQLException {
+        try (Connection connection = dataSource.getConnection()) {
+            return row(connection, sql, parameters);
+        }
+    }
+
+    static List<Object> row(Connection connection, String sql, Object... parameters) throws SQLException {
         List<Object> values = new ArrayList<>();
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = prepare(connection, sql, parameters);
+        try (PreparedStatement statement = prepare(connection, sql, parameters);
              ResultSet result = statement.executeQuery()) {
             if (result.next()) {
                 for (int column = 1; column <= result.getMetaData().getColumnCount(); column++) {
