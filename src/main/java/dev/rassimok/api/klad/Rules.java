@@ -51,6 +51,12 @@ final class Rules {
     // Code requests count one after another in the database anyway, so two
     // at a time per instance lose nothing.
     static final int CODE_REQUESTS_PER_INSTANCE = 2;
+    // A WebSocket text message, counted in UTF-8 bytes.
+    static final int SOCKET_MESSAGE_BYTES_MAX = 512;
+    // Each open socket holds one of the instance's request slots on Cloud
+    // Run; this keeps most of them free for REST.
+    static final int SOCKETS_OPEN_MAX = 20;
+    static final int SOCKET_UNFINISHED_SENDS_MAX = 8;
 
     private Rules() {
     }

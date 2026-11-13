@@ -1,6 +1,7 @@
 package dev.rassimok.api.klad;
 
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.transaction.Transactional;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 import org.jboss.resteasy.reactive.RestResponse;
@@ -45,6 +46,9 @@ public class Sessions {
         return token;
     }
 
+    // Transactional so the WebSocket handshake check can call it from a
+    // worker thread, where no request context is active.
+    @Transactional
     boolean isSignedIn(String token) {
         return null != findValid(token, Instant.now());
     }
