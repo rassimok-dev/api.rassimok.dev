@@ -51,6 +51,10 @@ final class Rules {
     // Code requests count one after another in the database anyway, so two
     // at a time per instance lose nothing.
     static final int CODE_REQUESTS_PER_INSTANCE = 2;
+    // The guest purge runs once a day; a backlog beyond the batch waits for
+    // the next run, so the request that carries it stays short.
+    static final Duration PURGE_INTERVAL = Duration.ofDays(1);
+    static final int PURGE_BATCH = 1_000;
     // A WebSocket text message, counted in UTF-8 bytes.
     static final int SOCKET_MESSAGE_BYTES_MAX = 512;
     // Each open socket holds one of the instance's request slots on Cloud
