@@ -495,12 +495,21 @@ class RaceSocketTest {
         return connectSeat(new SocketRoute.Seat(player.token(), RaceRooms.RACE_PATH + roomId));
     }
 
-    // The client resumes a new socket before the caller gets it, so the
-    // handlers are set in the connect's own callback, or the first
-    // messages could pass with none.
+    // The client resumes a new socket before the connect future completes, so
+    // the handlers are set in the callback form, which runs in the same
+    // event-loop task, or the first messages could pass with none.
     private RaceClient connectSeat(SocketRoute.Seat seat) throws Exception {
         RaceClient raceClient = new RaceClient();
-        await(client.connect(options(seat)).onSuccess(raceClient::attach));
+        CompletableFuture<Void> connected = new CompletableFuture<>();
+        client.connect(options(seat), result -> {
+            if (result.succeeded()) {
+                raceClient.attach(result.result());
+                connected.complete(null);
+            } else {
+                connected.completeExceptionally(result.cause());
+            }
+        });
+        connected.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
         clients.add(raceClient);
         return raceClient;
     }

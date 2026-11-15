@@ -45,6 +45,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
@@ -192,11 +193,12 @@ class SocketGuardsTest {
         // given
         WebSocketClient compressingClient = vertx.createWebSocketClient(offer);
         CompletableFuture<String> extensions = new CompletableFuture<>();
-        WebSocket socket = await(compressingClient.connect(options(ALLOWED_ORIGIN, route.newSeat()))
-                .onSuccess(connected -> extensions.complete(connected.headers().get("Sec-WebSocket-Extensions"))));
-        socketsToClose.add(socket);
         BlockingQueue<String> received = new LinkedBlockingQueue<>();
-        socket.textMessageHandler(received::add);
+        WebSocket socket = connect(compressingClient, options(ALLOWED_ORIGIN, route.newSeat()), connected -> {
+            extensions.complete(connected.headers().get("Sec-WebSocket-Extensions"));
+            connected.textMessageHandler(received::add);
+        });
+        socketsToClose.add(socket);
 
         // when
         socket.writeTextMessage(route.request());
@@ -210,14 +212,14 @@ class SocketGuardsTest {
     @MethodSource("routes")
     void shouldReplyToEveryMessage_whenSendText_givenBurstOfMessages(SocketRoute route) throws Exception {
         // given
-        WebSocket socket = await(client.connect(options(ALLOWED_ORIGIN, route.newSeat())));
-        socketsToClose.add(socket);
         CountDownLatch replies = new CountDownLatch(BURST_MESSAGES);
-        socket.textMessageHandler(message -> {
-            if (!route.isUnprompted(message)) {
-                replies.countDown();
-            }
-        });
+        WebSocket socket = connect(client, options(ALLOWED_ORIGIN, route.newSeat()),
+                connected -> connected.textMessageHandler(message -> {
+                    if (!route.isUnprompted(message)) {
+                        replies.countDown();
+                    }
+                }));
+        socketsToClose.add(socket);
 
         // when
         for (int i = 0; i < BURST_MESSAGES; i++) {
@@ -301,9 +303,9 @@ class SocketGuardsTest {
     @MethodSource("routes")
     void shouldCloseWithPolicyViolation_whenSendText_givenMessageOverLimit(SocketRoute route) throws Exception {
         // given
-        WebSocket socket = await(client.connect(options(ALLOWED_ORIGIN, route.newSeat())));
         CompletableFuture<Short> closeCode = new CompletableFuture<>();
-        socket.closeHandler(ignored -> closeCode.complete(socket.closeStatusCode()));
+        WebSocket socket = connect(client, options(ALLOWED_ORIGIN, route.newSeat()),
+                connected -> connected.closeHandler(ignored -> closeCode.complete(connected.closeStatusCode())));
 
         // when
         socket.writeTextMessage(LARGEST_MESSAGE + "\u0416");
@@ -319,9 +321,9 @@ class SocketGuardsTest {
     @MethodSource("routes")
     void shouldDropConnection_whenSendText_givenFrameOverSizeLimit(SocketRoute route) throws Exception {
         // given
-        WebSocket socket = await(client.connect(options(ALLOWED_ORIGIN, route.newSeat())));
         CompletableFuture<Short> closeCode = new CompletableFuture<>();
-        socket.closeHandler(ignored -> closeCode.complete(socket.closeStatusCode()));
+        WebSocket socket = connect(client, options(ALLOWED_ORIGIN, route.newSeat()),
+                connected -> connected.closeHandler(ignored -> closeCode.complete(connected.closeStatusCode())));
 
         // when
         socket.writeTextMessage("x".repeat(OVERSIZED_FRAME_BYTES));
@@ -355,9 +357,9 @@ class SocketGuardsTest {
     @MethodSource("routes")
     void shouldDropConnection_whenSendText_givenFragmentedMessageOverSizeLimit(SocketRoute route) throws Exception {
         // given
-        WebSocket socket = await(client.connect(options(ALLOWED_ORIGIN, route.newSeat())));
         CompletableFuture<Short> closeCode = new CompletableFuture<>();
-        socket.closeHandler(ignored -> closeCode.complete(socket.closeStatusCode()));
+        WebSocket socket = connect(client, options(ALLOWED_ORIGIN, route.newSeat()),
+                connected -> connected.closeHandler(ignored -> closeCode.complete(connected.closeStatusCode())));
 
         // when
         socket.writeFrame(WebSocketFrame.textFrame("x".repeat(FRAGMENT_BYTES), false));
@@ -834,9 +836,8 @@ class SocketGuardsTest {
     }
 
     private WebSocket connectReading(SocketRoute.Seat seat, BlockingQueue<String> received) throws Exception {
-        WebSocket socket = await(client.connect(options(ALLOWED_ORIGIN, seat)));
+        WebSocket socket = connect(client, options(ALLOWED_ORIGIN, seat), connected -> connected.textMessageHandler(received::add));
         socketsToClose.add(socket);
-        socket.textMessageHandler(received::add);
         return socket;
     }
 
@@ -852,11 +853,17 @@ class SocketGuardsTest {
     // The server frees a slot a moment after the client sees the close,
     // and handshakes in progress count too, so room can take a moment to show.
     private WebSocket connectWhenRoom(WebSocketConnectOptions options) throws Exception {
+        return connectWhenRoom(options, connected -> {
+        });
+    }
+
+    private WebSocket connectWhenRoom(WebSocketConnectOptions options, Consumer<WebSocket> attachHandlers)
+            throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS);
         WebSocket socket = null;
         while (null == socket) {
             try {
-                socket = await(client.connect(options));
+                socket = connect(client, options, attachHandlers);
             } catch (ExecutionException e) {
                 boolean shouldRetry = WebSocketHandshakeCheck.TOO_MANY_SOCKETS == refusalStatus(e)
                         && System.nanoTime() < deadline;
@@ -880,10 +887,10 @@ class SocketGuardsTest {
     }
 
     private String replyOnNewSocket(SocketRoute route) throws Exception {
-        WebSocket socket = connectWhenRoom(options(ALLOWED_ORIGIN, route.newSeat()));
-        socketsToClose.add(socket);
         BlockingQueue<String> received = new LinkedBlockingQueue<>();
-        socket.textMessageHandler(received::add);
+        WebSocket socket = connectWhenRoom(options(ALLOWED_ORIGIN, route.newSeat()),
+                connected -> connected.textMessageHandler(received::add));
+        socketsToClose.add(socket);
         socket.writeTextMessage(route.request());
         return nextReply(route, received);
     }
@@ -901,9 +908,9 @@ class SocketGuardsTest {
     }
 
     private void openAndEnd(SocketRoute.Seat seat, SocketAction action) throws Exception {
-        WebSocket socket = connectWhenRoom(options(ALLOWED_ORIGIN, seat));
         CompletableFuture<Void> closed = new CompletableFuture<>();
-        socket.closeHandler(ignored -> closed.complete(null));
+        WebSocket socket = connectWhenRoom(options(ALLOWED_ORIGIN, seat),
+                connected -> connected.closeHandler(ignored -> closed.complete(null)));
         action.run(socket);
         closed.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
@@ -1091,6 +1098,23 @@ class SocketGuardsTest {
         dataSource.setUser(properties.get("quarkus.datasource.username"));
         dataSource.setPassword(properties.get("quarkus.datasource.password"));
         return dataSource;
+    }
+
+    // The client resumes a new socket before the connect future completes,
+    // so a handler set after it could miss the first message. The callback
+    // form runs the handlers in the same event-loop task as the resume.
+    private static WebSocket connect(WebSocketClient webSocketClient, WebSocketConnectOptions options,
+            Consumer<WebSocket> attachHandlers) throws Exception {
+        CompletableFuture<WebSocket> connected = new CompletableFuture<>();
+        webSocketClient.connect(options, result -> {
+            if (result.succeeded()) {
+                attachHandlers.accept(result.result());
+                connected.complete(result.result());
+            } else {
+                connected.completeExceptionally(result.cause());
+            }
+        });
+        return connected.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
     private static <T> T await(Future<T> future) throws Exception {

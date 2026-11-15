@@ -16,6 +16,10 @@ colours), or a fifth runner would have been invisible to the others.
   `Room.start`, so no race logic changed.
 - `Rules.SOCKETS_OPEN_MAX` stays 20 (below). Its comment now says 2 full
   races of 10 at once instead of 5 full races.
+- Test fix: the socket tests set their handlers in the callback form of
+  `client.connect(options, handler)`, not on the returned future. Vert.x
+  4.5.33 resumes the new socket before it completes that future, so a
+  descheduled test thread lost the first `state` frame (flaky on main).
 - Contract sections 7 and 8 (workspace) say up to 10 players, `"size":10`
   and `slot` 0 to 9, the 503 for a third full race, and the lobby request
   cost of a full room.
