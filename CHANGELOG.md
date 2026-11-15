@@ -3,6 +3,200 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-15 (sixth) - Guests nobody can reach are deleted about 90 days after their last visit, and expired sessions
+
+The user wants klad to follow the GDPR as fully as possible (2026-11-15)
+and approved the purge the RAS-21 review proposed (RAS-59). Until now a
+guest lived only through its cookie: once the cookie was lost, cleared or
+expired, nobody could delete that guest any more, because deletion needs
+its session, and nothing deleted it on its own. Its nick and results stayed
+on the boards for good, which the storage-limitation principle (keep
+personal data no longer than needed) does not allow. Expired session rows
+of accounts stayed too. The deletion of expired guests in production is the
+approved purpose of the ticket (user, 2026-11-15). Once this is live, the
+privacy page (RAS-57) can say that guests are deleted automatically about
+90 days after their last visit, instead of offering that deletion by mail.
+
+- What goes, in one transaction (`GuestPurge`, contract section 2):
+  - every guest (no email) whose sessions have all expired, with its
+    sessions and results (`on delete cascade`, as for `DELETE
+    /players/me`), so its rows leave the boards;
+  - every guest without any session row whose `last_seen_at` is 90 days
+    or more before the purge;
+  - every expired session row of an account. Accounts and their results
+    never go.
+- A purged guest is also dropped from presence and rooms
+  (`PresenceStore.forget`, `RoomStore.forgetDeleted`, which takes its chat
+  messages too), in case it is still there.
+- When: the first REST request after the instance starts, then the first
+  one at least a day after the last run (`Rules.PURGE_INTERVAL`). A
+  `@ServerRequestFilter` runs it before the request's own work, on the
+  request's worker thread, in a transaction of its own
+  (`QuarkusTransaction.requiringNew()`). It applies to every REST
+  endpoint, `GET /status` included, and not to `/q/health` (a Vert.x
+  route) or the race socket.
+- Each run deletes at most 1,000 guests, those with the oldest
+  `last_seen_at` first, and 1,000 account sessions (`Rules.PURGE_BATCH`,
+  `delete ... where id in (select ... limit)`). Each wait for a row lock
+  ends after 2 s (`set local lock_timeout`, as code requests do), and each
+  statement, its waits included, after 10 s (`set local
+  statement_timeout`), so with its two deletes the purge holds up the
+  carrying request for about 20 s at the very worst.
+- A failed purge logs `Guest purge failed: <exception class>` at ERROR and
+  leaves the request's answer as it would be. A run logs `Guest purge
+  deleted <n> guests and <m> expired sessions` at INFO after each start
+  and then once a day. Neither
+  line holds a nick or an id.
+- No migration: `session`, `level_clear` and `game_run` already reference
+  `player` with `on delete cascade` (V1, V2). No new dependency and no
+  configuration change.
+- In production nothing is old enough yet: the first guests were made on
+  2026-11-13, so the first can go in February 2027. Until then each run
+  finds nothing, unless rows were dated back by hand.
+
+### Tests
+
+- `GuestPurgeTest` (unit, `FakeClock`): the first run is claimed, a second
+  one a second short of a day later is not, one a day later is, the day
+  counts from the last run, and of 32 threads claiming at once exactly one
+  gets the run.
+- `GuestPurgeDatabaseTest` (`@QuarkusTest`, Postgres, `purge` called with a
+  fixed purge time, every test from an empty database; its own profile
+  gives it a database of its own, so emptying it takes no players from
+  other test classes, such as the race tests' reused ones): an expired guest
+  goes with its session, clear and run; a guest made by `POST /players`
+  whose session was then set to have expired an hour ago goes (its
+  `last_seen_at` is fresh); a session expiring exactly at the purge time
+  counts as expired; a session valid one more second keeps the guest; an
+  old `last_seen_at` with a valid session keeps it; a guest without a
+  session goes at 90 days and stays a second before; an account with only
+  expired sessions keeps its row and results and loses the sessions; an
+  account keeps its valid session and loses the expired one; the three
+  boards list the purged guest before and not after; a purged guest is
+  gone from presence and from the room list; 1,001 expired guests take two
+  runs, 1,000 and 1, and the one left over keeps its session in between;
+  1,001 expired account sessions take two runs too; of 1,001 expired
+  guests, the one with the oldest last visit, inserted last, goes in the
+  first run. Two cases hold a second connection open while the purge waits
+  on its row, then commit: one turns a guest in its session's last moment
+  into an account as `POST /login/verify` does (email set, old session
+  deleted, a valid one added), and the account keeps its email, new
+  session and results; the other refreshes an account's expired session as
+  a request does, and the refreshed session stays. Both failed against the
+  statements without the outer re-check, and the oldest-first case without
+  the `order by`. Kept rows are compared whole, before and after.
+- `GuestPurgeRequestTest` (`@QuarkusTest`, its own profile for a fresh
+  application, HTTP and JDBC only): 10 parallel first requests all answer
+  200, the expired guest and its rows are gone, the account stays without
+  its expired session, a guest expired after that stays through one more
+  request, exactly one purge line is logged, and no log line holds the
+  guest's id or nick. `GuestPurgeRequestIT` runs the same against the
+  native binary (with the profile again, as a profile is not inherited, so
+  the binary is a fresh one), reading the binary's log file. In the
+  Mandrel Linux container all 284 native tests passed, and that binary
+  logged `Guest purge deleted 1 guests and 1 expired sessions`, so the
+  `delete ... returning id` read as UUIDs works in the image.
+- `GuestPurgeFailureTest` (`@QuarkusTest`, its own profile): a second
+  connection holds the expired guest's row; the first request waits out
+  the 2 s lock timeout and answers 200, the guest stays unchanged, one
+  failure line is logged and no success line, the next request runs no
+  purge, and no log line (Hibernate's own warning included) holds the id or
+  the nick.
+
+### Decisions worth not relitigating
+
+- **Every REST request can carry it, not one endpoint.** The ticket named
+  `POST /players` or the first session check as examples. A filter is the
+  broadest choice: the game's `GET /players/me` on every page load still
+  carries it, and so do the deploy's smoke request and any uptime check on
+  `GET /status`, so the purge does not wait for a player. It also runs
+  before the endpoint's transaction begins, so it holds none of that
+  request's locks and that request none of its own. All endpoints are
+  blocking, so the filter runs on a worker thread.
+- **Application scoped, not a singleton.** RESTEasy creates its filters
+  while the native image is built. As a `@Singleton`, `GuestPurge` was
+  created then too, with the `RoomStore` and `PresenceStore` it injects,
+  and the native build stopped at the `RoomStore`'s `SecureRandom` in the
+  image heap (the static-init rule of the rules file, caught by the native
+  build). The client proxy of `@ApplicationScoped` defers the bean,
+  and so the stores, to the first request.
+- **In the request, not after the answer.** Cloud Run gives no CPU between
+  requests, so work left running after the answer could stop in the middle
+  of its transaction, holding its locks. The first request after a start,
+  and then one a day, waits for the purge.
+- **The guard is in memory.** One instance (`--max-instances 1`) holds it
+  under a lock, so parallel requests run one purge. A restart or a scale to
+  zero runs it again on the next first request; each run is cheap and
+  finds nothing new, so no table (and no migration) was added for it. Two
+  instances during a deploy may each run one; the second waits for the
+  first's row locks and finds those rows gone (or, past 2 s, fails, logs
+  and tries a day later).
+- **Claimed before it runs, kept when it fails.** A broken purge then
+  retries a day later instead of running, and logging, on every request.
+- **A guest without any session goes by `last_seen_at`.** A guest with
+  sessions goes once they have all expired, as the ticket says. A guest
+  without any session row (one that called `POST /logout`, or one left
+  behind by a login into an account of the other kind, contract section 5)
+  has no expiry to go by: selecting only expired sessions would keep it
+  forever, selecting "no valid session" would delete it within a day of
+  that login, against the section 5 decision that it keeps its nick and
+  results. `Sessions` sets `last_seen_at` and `expires_at` from the same
+  `now`, on creation and on every refresh, and a guest has only the
+  session it was created with, so 90 days after `last_seen_at` is when its
+  session would have expired: it goes on the same clock as every other
+  guest.
+- **The boundary is the request's.** `expires_at` equal to the purge time
+  counts as expired, as in `Sessions.findValid`.
+- **Each delete re-checks its deciding column outside the subquery.** When
+  a delete has to wait for a row that a concurrent transaction changes,
+  Postgres (read committed) re-checks only the outer `where` on the
+  committed row; the `in (select ... limit)` answer stays as it was. So
+  the outer `where` repeats the column a request can change: `email is
+  null` for the guests, `expires_at <= :now` for the sessions. Without
+  them, both reviews reproduced on Postgres 18 that a guest turned into an
+  account by `POST /login/verify` in its session's last moment was deleted
+  with its email, new session and results, and that an account session
+  refreshed at its expiry instant was deleted; both cases are now closed
+  and tested. `for update skip locked` in the subqueries would also avoid
+  them, but it skips held rows instead of waiting, which changes the
+  lock-timeout behaviour `GuestPurgeFailureTest` pins.
+- **A guest refreshed at its expiry instant can still lose.** The refresh
+  changes the session and `last_seen_at`, not `email`, so if that day's
+  purge picked the guest first, it goes, and the request answers 500 or
+  its new cookie leads nowhere: one failed request, as if the guest had
+  expired a moment earlier. Reasoned, not tested here (the security review
+  reproduced it); the window is one request's length at the expiry
+  instant, and a margin would delete later than the ticket says.
+- **1,000 rows per table and run, oldest guests first.** Real traffic is a
+  few guests a day; a flood of scripted guests (`POST /players` has no
+  limit) then goes over several days instead of making one request slow.
+  Without an order Postgres takes the candidates in table order, so such a
+  flood could sit ahead of real guests whose last visit came before it and
+  hold them back past "about 90 days"; `order by player.last_seen_at`
+  before the `limit` drains the backlog first in, first out by last visit,
+  for one sort of the candidates. It still runs once a day: draining a
+  backlog faster would go against the ticket's "at most once a day". The
+  guest delete reads every guest, live ones included, so its time grows
+  with the number of guests, not with the batch: on a local Postgres 18
+  with 200,000 expired guests and 20,000 live ones it took 348 ms for its
+  1,000 rows, while in a container held to a quarter vCPU about 1.1
+  million guests reached the 10 s statement timeout (Neon's small compute
+  not measured). Past that size every run is cancelled, logs its class and
+  deletes nothing, until `POST /players` gets a creation limit (a
+  follow-up) or the purge is run by hand; a longer timeout or a partial
+  index on `player (last_seen_at)` for guests are the options then.
+  The session delete takes only accounts' sessions: a guest's go with it,
+  and a guest left over by the batch keeps its expired session, so the
+  next run still finds it as a guest whose sessions have expired rather
+  than one without a session, which would wait for its `last_seen_at`.
+- **The failure line names the exception class only.** A Postgres message
+  can quote key values, which are player ids. Hibernate's own warning for
+  the failed statement stays; for the statements here it names a relation
+  and a row position, not a key (checked for the lock timeout).
+- **Agent test entries go too.** The production test players of kind
+  `agent` (contract section 6) are guests and go about 90 days after their
+  last visit like any other.
+
 ## 2026-11-15 (fifth) - A socket upgrade never runs inside the read of its handshake
 
 `SocketGuardsTest.shouldOpenSocketsUpToCap_whenConnect_givenTwoHandshakesInOneWrite`
