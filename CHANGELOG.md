@@ -3,6 +3,265 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-15 (fourth) - Room chat: members write in the room, read it in the room poll, memory only
+
+The user wants players to write to each other in the lobby before a game
+(RAS-53, contract sections 1 and 7). This is the API part; the game shows
+the chat in RAS-54, and chat during a race is RAS-55 and RAS-56. The user
+answered every open question of the ticket on 2026-11-15, each as
+recommended. The API ships first and reaches players only by hand until
+RAS-54 brings the chat and the privacy notes together, as the email login
+did (RAS-23 and RAS-24 before RAS-25). By the ticket's reading of the
+site code (not run here), the game copies named fields only (`roomView`
+in `klad/lobby.js`), so the API can deploy first and the new fields do
+not reach players before that.
+
+- `POST /rooms/<id>/messages` with `{"text"}` answers 201 with the message
+  as stored: `{"n","member","nick","kind","guest","you","text"}`. Only a
+  member may send (Q1 a); every member does, guests and accounts, humans
+  and agents (Q3 a). It works in every state, so RAS-55 can build on it.
+  `n` counts up from 1 in each room with no gaps (under `RoomStore`'s
+  lock). `member`, `nick`, `kind` and `guest` are the sender's at the
+  moment of sending and come from the server, so a message cannot fake its
+  sender; `you` marks the caller's own messages (Q7 c). No player id and no
+  email leave the API.
+- Reading travels in the room poll (Q2 a): every room answer of a member
+  (`GET /rooms/<id>`, `join`, `ready`, `level`, `listed`, `start`) carries
+  `messages`, oldest first, holding the messages sent after the caller's
+  join (Q4 a). `GET /rooms/<id>?after=<n>` keeps those with a number above
+  `n`, so the game asks for what is newer than the last one it showed and
+  a late or lost answer loses none. A caller who is not a member, or who
+  has left, gets the room as before (RAS-45: `host` null, `players` empty)
+  with `messages` empty, and 404 `not_found` on a send.
+- The member number (`member`) is new on each `players` entry too: each
+  join takes the room's next number from 1, never given twice in one room.
+  It tells two guests with one nick apart, and RAS-54's "hide this player"
+  works by it (Q8 b, on the device, no API change beyond the number). It
+  is not the player id and not the race `slot`.
+- Text (Q5 a, Q6 a): NFKC-normalised and trimmed as nicks are
+  (`ChatTexts`, next to `Nicks`), then 1 to 120 characters from an
+  allow-list: printable ASCII (letters, digits, the space, punctuation),
+  the Russian Cyrillic letters, and the quotes and dashes phone keyboards
+  put in by themselves (U+00AB, U+00BB, U+2018, U+2019, U+201C, U+201D,
+  U+2013, U+2014). Everything else is 400 `invalid_message`: a line break,
+  a tab or another control character, zero-width and other invisible
+  characters, direction overrides and marks (U+202E and the rest), emoji,
+  accented and other letters, a missing or non-string `text`. Links stay
+  plain text and no rule looks for them; the game shows the text as text.
+- Limits (Q5 a): at most 5 accepted messages per player in a room in any
+  10 s, counted in memory as a sliding window like `isOverPositionRate`;
+  the sixth is 429 `rate_limited` and is not kept. `Rules` holds the
+  numbers (`CHAT_TEXT_LENGTH_MAX`, `CHAT_MESSAGES_KEPT`,
+  `CHAT_MESSAGES_PER_WINDOW`, `CHAT_WINDOW`).
+- What is kept (Q4 a): the last 30 messages of each room, in `Room`, in
+  memory only; the 31st drops the oldest. They go with the room (10
+  minutes after it empties, or when its host opens a new room) and with
+  every restart or deploy. Nothing is written to the database (no
+  migration) and nothing to a log line, also not on an error.
+- Errors, checked in the order of section 7: 401 `no_session`; 400
+  `invalid_message`, or `invalid_query` for an `after` that is not 1 to 9
+  ASCII digits; 404 `not_found` for an unknown room and for a non-member;
+  429 `rate_limited`; 415 and 413 as in contract section 1 (the send reads
+  a JSON body, so the 415 filter and the 4 KB limit apply).
+- Code: `RoomResource` (the POST, the `after` query), `RoomStore.send` and
+  `find(..., after)` under the lock, `Room` (the chat list, `n`, the member
+  number, the rate window), `RoomView` (`messages`, `member`, the new
+  `Message` record, returned typed on the 201 so the native image
+  registers it), `ChatTexts`, `Rules`, `ApiException.INVALID_MESSAGE`.
+
+### Abuse and privacy, by the ticket's facts
+
+- **Free text from strangers.** Guests are free to create (`POST /players`
+  has no limit, and the API has no IP limits by a plan decision), so a
+  limit per player does not stop someone who makes new guests: in a
+  `lobby` room with a free place, a fresh guest joins, sends 5 and leaves,
+  and the next one does the same, held back only by the request rate. The
+  window is kept per player id in the room, so the same player leaving and
+  joining again does not reset it; only a new guest does. The members
+  present at one time (at most 10) send at most 50 messages per 10 s;
+  fresh guests taking turns in a free place can add more.
+- **A room is not always friends.** Since the open rooms list (RAS-45) any
+  player can enter a listed room with a free place, then read and write
+  there. A chat among invited friends needs a link-only room
+  (`POST /rooms?listed=false`). A member reads only what was written after
+  their join, so entering a room shows none of the earlier chat.
+- **Nobody can check afterwards.** The messages live in memory only, so no
+  one can read them later, the owner included. That keeps the privacy
+  promise small, and it means a complaint cannot be checked. The contact
+  for reports is the chat note of RAS-54 (hello.rassimok@gmail.com, the
+  user's choice; research item 19: a chat likely brings EU DSA hosting
+  duties, not legal advice).
+- **Agents read it too.** A player may be an AI or a script; for an agent,
+  chat is text written by strangers. The text is one line from the
+  allow-list, and the nick and marks come from the server, so a message
+  cannot imitate a second message or another sender.
+- **A sent message cannot be taken back.** A member who leaves, logs out
+  or deletes their player leaves their messages in the room, under the
+  nick they were sent with, until 30 newer ones push them out or the room
+  goes. The message keeps no player id, only the member number.
+- **The privacy promise.** The site says what the server keeps: a nick,
+  the choice of human or agent, results, and an email for an account. Chat
+  messages are new. Both rules files say the note changes before the API
+  keeps more; by the user's order b (Q9) the note comes with the chat UI
+  in RAS-54, and until then only someone who calls the API by hand can
+  send a message.
+- **Requests.** Each sent message is one Workers request and one session
+  read from Neon; reading costs nothing extra. A full room of 10 at the
+  limit sends at most 300 a minute (more with fresh guests taking turns in
+  a free place), which would use the shared 100,000 a day in about 5.5
+  hours; any signed-in player can flood other endpoints as cheaply, so the
+  chat adds no new way to do it.
+- **Logs.** No log line may hold the text of a chat message, as for an
+  email address (rules file, Klad privacy). No code path logs the text,
+  and no exception message carries it. The same must hold for whatever
+  monitoring tool RAS-50 brings: it must not collect request bodies.
+- **Memory, measured on the native binary** of this branch (the binary
+  the native tests then ran against), set up as for the RAS-32 and RAS-43
+  tables: `--memory 256m --memory-swap 256m --cpus 1`, a throwaway
+  `postgres:18`, a Java client in a second container, each row on a fresh
+  server container. 600 guests in 100 rooms of 6, all joined first; in the
+  chat rows each member then sends 5 messages of 120 Cyrillic letters
+  (240 bytes of UTF-8, the largest text), so every room holds its 30; then
+  every member reads its room three times, 10 s apart (a full answer is
+  about 6,800 characters). Sizes in MiB from the container's cgroup. Idle:
+  97.7 to 103.5 peak, 21.5 to 23.5 `anon`.
+
+  | Row | Peak | `anon` max | `anon` at the end |
+  |---|---|---|---|
+  | 100 rooms of 6, no chat, run 1 | 149.7 | 62.6 | 57.9 |
+  | the same, run 2 | 143.8 | 65.0 | 58.1 |
+  | 100 rooms of 6, full chats, run 1 | 141.7 | 62.5 | 51.4 |
+  | the same, run 2 | 141.5 | 62.5 | 51.4 |
+
+  - All 3,000 messages were accepted, and each of the 1,800 reads in a
+    chat row held all 30. `/status` answered 200 after every row, nothing
+    was logged at WARN or above, and no log line held the chat letters
+    (the binary logs JSON, as in production).
+  - The chats do not show in the numbers: the chat rows peak lower than
+    the rows without (not traced to a cause). By reasoning, a kept message is about 450 bytes (the
+    text, at most 240 bytes in its string, its own nick and kind strings,
+    the record), so the 3,000 messages hold about 1.3 MiB, plus at most a
+    few hundred KB for the rate windows; that is less than the spread
+    between two runs of one row. Against the 20-socket flood's 228.7 MiB
+    (2026-11-13, ninth) the chat adds about 2 MiB at most, and no row came
+    near the 80 % line (204.8 MiB) used for RAS-43.
+
+### Tests
+
+- Unit: `ChatTextsTest` (new, 54 cases), one case or more per rule of
+  Q5 and Q6: 120 characters pass (Latin and Cyrillic), 121 fail; empty,
+  null and spaces only; a line break inside (LF, CR, U+2028, U+2029), a
+  tab, BEL, DEL and NEL; zero-width space, non-joiner and joiner, word
+  joiner, BOM, soft hyphen, invisible times; U+202E, U+202D, isolates,
+  RLM, LRM and the Arabic mark; emoji (a face, a heart with its selector,
+  a flag, a smiley symbol, a lone surrogate); an accented letter, a
+  combining mark, a Ukrainian letter, Greek, Chinese and Arabic digits;
+  the normalised form (spaces, fullwidth, U+00A0 to a space, U+2026 to
+  three dots, a trailing line break trimmed), and a text that grows past
+  120 under NFKC.
+- Unit, fake clock: `RoomStoreTest` (+26): the stored message and the
+  sender's marks, whole rooms for the sender and another member; an agent
+  account (`kind` agent, `guest` false); two twins told apart by `member`;
+  the nick kept as sent after a rename; 404 for a non-member, a member who
+  left and an unknown room; no messages for an outsider and for a member
+  who left; a later joiner reads only later messages, and so does a member
+  who comes back (with a new number); `after` on both sides and together
+  with the join rule; the messages on the answers of ready, level, listed,
+  join and start; 30 kept, the 31st drops the oldest (whole list); a host's
+  new room starts empty and the old one is gone; a room removed after its
+  10 minutes is 404; a send in `starting`; the sixth message within 10 s
+  less 1 ms is 429 and not kept, at 10 s it passes; a refused message does
+  not count toward the window; leaving and joining again does not reset
+  it; each member counts apart; a send counts as seen (a member who only
+  sends is not swept); 50 sends from all 10 members at once on 16 threads
+  get the numbers 1 to 50 with no gap or repeat, and the room keeps 21 to
+  50 in order. Every existing whole-room comparison now carries `member`
+  and `messages`; after a leave or a handover the numbers are not the list
+  positions (Bob stays 2), which the tests pin. `RoomStoreRaceTest` (+1): a
+  send in `racing` is kept and sends nothing over the race sockets.
+- `@QuarkusTest`: `RoomResourceTest` (+43): the send and
+  `GET /rooms/<id>?after=x` in the 401 lists (no cookie, unknown cookie),
+  an expired session on a send; whole JSON answers of the send (201, no
+  cookie resent) and of both members' reads; `after` 1 and 2, an empty
+  `after`, ten bad values (`x`, `-1`, `+5`, `1.5`, `1e3`, ` 1`, `0x1`,
+  ten digits, 2147483648, twenty digits) and a bad one for an unknown room
+  (400 before 404); outsider and left member reads; 404 sends; a later
+  joiner; the ready answer with the message; the stored normalised text;
+  120 Cyrillic letters pass, 121 characters and twelve bad bodies fail
+  with 400 (sent to an unknown room, so the text is checked first); the
+  sixth message at once is 429 and not kept; 415 for `text/plain`; 413
+  over 4 KB with no body. Whole JSON objects are compared, so an extra
+  field, a player id or an email fails. `ResponseHeadersTest` (+7): the
+  three headers on 201, 400 and 429 of the send, plus 401, 415 and 400
+  `bad_request` cases and the two bodies without a JSON type.
+- `ChatLogTest` (new, JVM only, under `JsonLogProfile`, so the lines are
+  the production JSON format written to a file): one marker text goes
+  through a chunked 413, five accepted sends, a 429, a 121-character, a
+  zero-width and a two-line 400, two bodies that are not JSON (the marker
+  as a bare token, and unterminated), a non-member's 404, a 401 and a 415;
+  then `/test-only/boom` writes a known ERROR line with a stack trace. The
+  test waits for that line (counted, as the file outlives a run) and finds
+  the marker in no line of the file and in no log record (message,
+  parameters, exception chain). Checked by mutation: one `LOG.info` of the
+  text fails it on the file check (the record check after it was not
+  reached).
+- Native: `RoomResourceIT` and `ResponseHeadersIT` run the new cases
+  against the binary (the JSON of `RoomView.Message`, nested and alone).
+
+### Decisions worth not relitigating
+
+- **A deleted player's nick and text stay in the room's chat**, decided
+  here. Deleting the player, a merge and a logout still remove the member
+  at once (2026-11-13, eighth: "so a deleted nick does not linger"), but
+  the messages they sent stay, under the nick they were sent with, until
+  30 newer ones push them out or the room goes (at most 10 minutes after
+  it empties). Reason: the ticket's note must say that a sent message
+  cannot be taken back (Q9), and a message holds no player id. The
+  alternative, if the user prefers it: `forget` also drops the leaving
+  member's messages, by the member number it knows at that moment (a
+  small change in `Room`). RAS-54's chat note and the "delete my nick and
+  results" wording must say which one holds.
+- **The allow-list, decided here.** Printable ASCII, the Russian Cyrillic
+  letters (the nick alphabet's), and the guillemets, curly quotes and en
+  and em dashes that phone keyboards insert by themselves; without those,
+  "don't" typed on a phone would be refused. Accented Latin letters and
+  other Cyrillic letters (Ukrainian U+0456, U+0457, U+0454) are left out on
+  purpose: widening the list later breaks no client, narrowing it would.
+- **The length is counted on the stored form**, after NFKC and the trim,
+  as for nicks, so a text that NFKC makes longer (U+2026 becomes three
+  dots) can fail at 120. Every allowed character is one UTF-16 unit, so
+  the count is in characters, and 120 Cyrillic letters are 240 bytes of
+  UTF-8, within RAS-55's 512-byte socket message.
+- **A trailing line break is trimmed, not refused**: the trim of nicks
+  removes it, and the stored text is still one line. A line break inside
+  the text is 400.
+- **`after`** is 1 to 9 ASCII digits, so no value can fail the int
+  conversion (a 500); an empty value counts as absent, as Quarkus REST
+  hands it in as none (the same as `listed` in RAS-45). Only
+  `GET /rooms/<id>` reads it; the other room answers list every message
+  the caller may read, as the ticket says.
+- **The member number** is a counter per room from 1, never given twice,
+  rather than the lowest free number: a reused number would give a new
+  player the place of a hidden one in RAS-54's "hide this player". The
+  price: a member who comes back, also after the 60 s sweep of a hidden
+  tab, gets a new number and reads only what comes after the new join, so
+  a hide by number does not follow them, as it does not follow a new
+  guest.
+- **The rate window is kept per player id in the room**, not on the member,
+  so a leave and a join does not reset it (it would have made 5 messages
+  cost 7 requests). Entries older than the window are dropped on every
+  send in the room, so the map holds at most the players who sent in the
+  last 10 s. Only accepted messages count; a refused one (400, 404, 429)
+  counts neither toward the window nor as seen. An accepted one counts as
+  seen, like every successful room request of a member.
+- **A message keeps the sender's nick, kind and guest mark of the moment
+  of sending** (from the request's player, not the member entry, which
+  could be stale after a login), and the member number, never the player
+  id. `you` compares member numbers, which is exact because a member reads
+  only messages sent after their own join.
+- **Sending is allowed in every state**, `starting` and `racing` too, so
+  RAS-55 can build on it. Nothing is sent over the race socket yet.
+
 ## 2026-11-15 (later still) - Rooms of up to 10 players
 
 The user wants up to 10 players in one room (RAS-43, contract sections 7

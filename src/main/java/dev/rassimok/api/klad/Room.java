@@ -8,8 +8,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -57,15 +59,32 @@ final class Room {
 
         final UUID playerId;
         final String kind;
+        // Never given twice in one room, so a member who leaves and comes
+        // back, or a new guest with the same nick, gets another one.
+        final int number;
+        // The number of the last chat message sent before the join; the
+        // member reads only the ones after it.
+        final int chatStart;
         String nick;
         boolean isReady;
         Instant lastSeenAt;
 
-        private Member(LobbyPlayer player, Instant now) {
+        private Member(LobbyPlayer player, int number, int chatStart, Instant now) {
             playerId = player.id();
             kind = player.kind();
+            this.number = number;
+            this.chatStart = chatStart;
             nick = player.nick();
             lastSeenAt = now;
+        }
+    }
+
+    // A chat message as stored: the sender's member number, nick and marks
+    // at the time of sending, never their player id.
+    private record ChatMessage(int n, int member, String nick, String kind, boolean isGuest, String text) {
+
+        RoomView.Message seenBy(Member viewer) {
+            return new RoomView.Message(n, member, nick, kind, isGuest, viewer.number == member, text);
         }
     }
 
@@ -119,6 +138,13 @@ final class Room {
     // Kept when the room empties, so its last host's next room still closes it.
     private UUID hostId;
     private Instant emptySince;
+    private int lastMemberNumber;
+    // The last chat messages, oldest first, in memory only.
+    private final Deque<ChatMessage> chat = new ArrayDeque<>();
+    private int lastMessageNumber;
+    // The chat messages accepted in the last window, per player rather than
+    // per member, so leaving and joining again does not reset the limit.
+    private final Map<UUID, Deque<Instant>> recentMessages = new HashMap<>();
     // In slot order, from the start to the results; empty in the lobby.
     private final List<Racer> racers = new ArrayList<>();
     private Instant startingAt;
@@ -167,7 +193,8 @@ final class Room {
     }
 
     void add(LobbyPlayer player, Instant now) {
-        members.add(new Member(player, now));
+        lastMemberNumber++;
+        members.add(new Member(player, lastMemberNumber, lastMessageNumber, now));
         hostId = members.getFirst().playerId;
         emptySince = null;
     }
@@ -199,16 +226,49 @@ final class Room {
         }
     }
 
-    // A player outside the room sees it as empty: the list hands out the ids,
-    // and it must not show who plays with whom.
     RoomView view(UUID viewerId) {
-        List<Member> shownMembers = null == member(viewerId) ? List.of() : members;
+        return view(viewerId, 0);
+    }
+
+    // A player outside the room sees it as empty: the list hands out the ids,
+    // and it must not show who plays with whom, nor what they write.
+    RoomView view(UUID viewerId, int after) {
+        Member viewer = member(viewerId);
+        List<Member> shownMembers = null == viewer ? List.of() : members;
         List<RoomView.RoomPlayer> players = shownMembers.stream()
                 .map(member -> new RoomView.RoomPlayer(member.nick, member.kind, member.isReady,
-                        member.playerId.equals(hostId), member.playerId.equals(viewerId)))
+                        member.playerId.equals(hostId), member == viewer, member.number))
                 .toList();
         RoomView.Host host = shownMembers.isEmpty() ? null : new RoomView.Host(shownMembers.getFirst().nick);
-        return new RoomView(id, stateName(), host, players, level, shape, Rules.ROOM_SIZE, isListed);
+        List<RoomView.Message> messages = null == viewer ? List.of() : chat.stream()
+                .filter(message -> Math.max(after, viewer.chatStart) < message.n())
+                .map(message -> message.seenBy(viewer))
+                .toList();
+        return new RoomView(id, stateName(), host, players, level, shape, Rules.ROOM_SIZE, isListed, messages);
+    }
+
+    // Like the position limit, a sliding window over the accepted messages;
+    // a refused one does not count.
+    boolean isOverMessageRate(UUID playerId, Instant now) {
+        Instant windowStart = now.minus(Rules.CHAT_WINDOW);
+        recentMessages.values().forEach(sentAt -> sentAt.removeIf(acceptedAt -> !acceptedAt.isAfter(windowStart)));
+        recentMessages.values().removeIf(Deque::isEmpty);
+        Deque<Instant> sentAt = recentMessages.get(playerId);
+        return null != sentAt && Rules.CHAT_MESSAGES_PER_WINDOW <= sentAt.size();
+    }
+
+    // Allowed in every state. The oldest message goes once the room holds
+    // more than it keeps.
+    RoomView.Message send(Member sender, LobbyPlayer player, String text, Instant now) {
+        recentMessages.computeIfAbsent(player.id(), playerId -> new ArrayDeque<>()).addLast(now);
+        lastMessageNumber++;
+        ChatMessage message = new ChatMessage(lastMessageNumber, sender.number, player.nick(), player.kind(),
+                player.isGuest(), text);
+        chat.addLast(message);
+        if (Rules.CHAT_MESSAGES_KEPT < chat.size()) {
+            chat.removeFirst();
+        }
+        return message.seenBy(sender);
     }
 
     // Only for a room with members, as the list never shows an empty one.
