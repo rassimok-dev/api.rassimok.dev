@@ -231,26 +231,37 @@ class RoomResourceTest {
     }
 
     @Test
-    void shouldAnswerRoomFull_whenJoin_givenFifthPlayer() {
+    void shouldAcceptTenthPlayer_whenJoin_givenNinePlayersInRoom() {
         // given
         String id = createRoom(guest(HOST));
-        join(guest("Second"), id).statusCode(200);
-        join(guest("Third"), id).statusCode(200);
-        join(guest("Fourth"), id).statusCode(200);
+        IntStream.range(2, 10).forEach(i -> join(guest("Joiner" + i), id).statusCode(200));
 
         // when
-        ValidatableResponse response = join(guest("Fifth"), id);
+        ValidatableResponse response = join(guest("Tenth"), id);
+
+        // then
+        response.statusCode(200).body("size", equalTo(10)).body("players.size()", equalTo(10));
+    }
+
+    @Test
+    void shouldAnswerRoomFull_whenJoin_givenEleventhPlayer() {
+        // given
+        String id = createRoom(guest(HOST));
+        IntStream.range(2, 11).forEach(i -> join(guest("Joiner" + i), id).statusCode(200));
+
+        // when
+        ValidatableResponse response = join(guest("Eleventh"), id);
 
         // then
         response.statusCode(409).body("", equalTo(Map.of("error", ApiException.ROOM_FULL)));
     }
 
     @Test
-    void shouldTakeExactlyThreeMore_whenJoin_givenSixPlayersAtOnce() throws Exception {
+    void shouldTakeExactlyNineMore_whenJoin_givenTwelvePlayersAtOnce() throws Exception {
         // given
         String host = guest(HOST);
         String id = createRoom(host);
-        List<String> tokens = IntStream.range(0, 6).mapToObj(i -> guest("Rush" + i)).toList();
+        List<String> tokens = IntStream.range(0, 12).mapToObj(i -> guest("Rush" + i)).toList();
         List<Callable<Integer>> joins = tokens.stream()
                 .<Callable<Integer>>map(token -> () -> join(token, id).extract().statusCode())
                 .toList();
@@ -264,7 +275,7 @@ class RoomResourceTest {
         }
 
         // then
-        assertThat(statuses, containsInAnyOrder(200, 200, 200, 409, 409, 409));
+        assertThat(statuses, containsInAnyOrder(200, 200, 200, 200, 200, 200, 200, 200, 200, 409, 409, 409));
         find(host, id).statusCode(200).body("players.size()", equalTo(Rules.ROOM_SIZE));
     }
 

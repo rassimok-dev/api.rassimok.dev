@@ -55,7 +55,7 @@ final class Rules {
     static final int SOCKET_MESSAGE_BYTES_MAX = 512;
     // Each open socket holds one of the instance's request slots on Cloud
     // Run; this keeps most of them free for REST. With one instance it is
-    // the cap for the whole service: 5 full races at once.
+    // the cap for the whole service: 2 full races of 10 at once.
     static final int SOCKETS_OPEN_MAX = 20;
     static final int SOCKET_UNFINISHED_SENDS_MAX = 8;
     // How long a socket may take to end after the server's close frame.
@@ -67,7 +67,7 @@ final class Rules {
     static final int PRESENCE_MAX = 1_000;
     static final int ROOMS_MAX = 100;
     static final int ROOMS_LISTED_MAX = 20;
-    static final int ROOM_SIZE = 4;
+    static final int ROOM_SIZE = 10;
     static final int ROOM_PLAYERS_TO_START = 2;
     static final int ROOM_ID_LENGTH = 10;
     static final Duration LOBBY_MEMBER_SILENCE = Duration.ofSeconds(60);

@@ -51,7 +51,7 @@ final class RaceRoute implements SocketRoute {
         return new Seat(host, RaceRooms.RACE_PATH + id);
     }
 
-    // Rooms of four, so twenty seats take five rooms.
+    // Full rooms of ten, so twenty seats take two rooms.
     @Override
     public synchronized List<Seat> newSeats(int count) {
         forgetPlayersOfEarlierStart();
