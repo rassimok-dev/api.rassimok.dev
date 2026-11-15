@@ -112,6 +112,8 @@ final class Room {
     State state = State.LOBBY;
     int level = Rules.LEVEL_MIN;
     String shape = Rules.SHAPE_LANDSCAPE;
+    // The room's own setting, so it outlasts a host handover and a race.
+    boolean isListed = true;
     // In join order; the first one is the host.
     private final List<Member> members = new ArrayList<>();
     // Kept when the room empties, so its last host's next room still closes it.
@@ -156,6 +158,14 @@ final class Room {
         return members.isEmpty() && emptySince.plus(Rules.EMPTY_ROOM_LIFETIME).isBefore(now);
     }
 
+    boolean isShownInList() {
+        return isListed && !members.isEmpty();
+    }
+
+    int playerCount() {
+        return members.size();
+    }
+
     void add(LobbyPlayer player, Instant now) {
         members.add(new Member(player, now));
         hostId = members.getFirst().playerId;
@@ -195,7 +205,13 @@ final class Room {
                         member.playerId.equals(hostId), member.playerId.equals(viewerId)))
                 .toList();
         RoomView.Host host = members.isEmpty() ? null : new RoomView.Host(members.getFirst().nick);
-        return new RoomView(id, stateName(), host, players, level, shape, Rules.ROOM_SIZE);
+        return new RoomView(id, stateName(), host, players, level, shape, Rules.ROOM_SIZE, isListed);
+    }
+
+    // Only for a room with members, as the list never shows an empty one.
+    RoomListView.ListedRoom listEntry() {
+        return new RoomListView.ListedRoom(id, stateName(), new RoomView.Host(members.getFirst().nick),
+                members.size(), Rules.ROOM_SIZE, level, shape);
     }
 
     // Slots follow the join order and stay fixed for the race.

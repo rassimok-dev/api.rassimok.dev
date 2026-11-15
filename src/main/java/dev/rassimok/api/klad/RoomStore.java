@@ -6,7 +6,8 @@ import jakarta.ws.rs.core.Response;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.HashMap;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -27,7 +28,8 @@ public class RoomStore {
     // An instance field, not a static one, so it is seeded when the service
     // starts and not when the native image is built.
     private final SecureRandom random = new SecureRandom();
-    private final Map<String, Room> rooms = new HashMap<>();
+    // In creation order: a room is put once, when it is made.
+    private final Map<String, Room> rooms = new LinkedHashMap<>();
 
     RoomStore() {
         this(Clock.systemUTC());
@@ -55,6 +57,19 @@ public class RoomStore {
         room.add(player, now);
         rooms.put(room.id, room);
         return room.id;
+    }
+
+    // Reading the list is not a heartbeat, so it takes no player. The sort is
+    // stable: among rooms with as many players, the oldest comes first.
+    synchronized RoomListView list() {
+        removeExpired(clock.instant());
+        List<RoomListView.ListedRoom> listed = rooms.values().stream()
+                .filter(Room::isShownInList)
+                .sorted(Comparator.comparingInt(Room::playerCount).reversed())
+                .limit(Rules.ROOMS_LISTED_MAX)
+                .map(Room::listEntry)
+                .toList();
+        return new RoomListView(listed);
     }
 
     synchronized RoomView find(String roomId, LobbyPlayer player) {
@@ -116,6 +131,16 @@ public class RoomStore {
         requireLobby(room);
         room.level = level;
         room.shape = shape;
+        room.markSeen(player, now);
+        return room.view(player.id());
+    }
+
+    // The switch changes only the list, so it works in every state.
+    synchronized RoomView setListed(String roomId, LobbyPlayer player, boolean isListed) {
+        Instant now = clock.instant();
+        Room room = existingRoom(roomId, now);
+        requireHost(room, player);
+        room.isListed = isListed;
         room.markSeen(player, now);
         return room.view(player.id());
     }

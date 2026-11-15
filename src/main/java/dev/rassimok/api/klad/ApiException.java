@@ -22,6 +22,7 @@ class ApiException extends RuntimeException {
     static final String NOT_HOST = "not_host";
     static final String NOT_READY = "not_ready";
     static final String INVALID_READY = "invalid_ready";
+    static final String INVALID_LISTED = "invalid_listed";
     static final String INVALID_LEVEL = "invalid_level";
     static final String INVALID_SHAPE = "invalid_shape";
 

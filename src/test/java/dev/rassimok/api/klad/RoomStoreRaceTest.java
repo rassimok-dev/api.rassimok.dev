@@ -276,7 +276,7 @@ class RoomStoreRaceTest {
         assertThat(rooms.find(id, alice), equalTo(new RoomView(id, STARTING, new RoomView.Host("Alice"),
                 List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, true, true, true),
                         new RoomView.RoomPlayer("Carol", Rules.KIND_HUMAN, true, false, false)),
-                Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE)));
+                Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true)));
         assertThat(rooms.raceRefusal(id, bob.id()), equalTo(409));
     }
 
@@ -538,7 +538,7 @@ class RoomStoreRaceTest {
         assertThat(room, equalTo(new RoomView(race.id(), LOBBY, new RoomView.Host("Alice"),
                 List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, false, true, false),
                         new RoomView.RoomPlayer("Bob", Rules.KIND_HUMAN, false, false, false)),
-                Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE)));
+                Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true)));
     }
 
     @Test
@@ -870,7 +870,7 @@ class RoomStoreRaceTest {
     }
 
     private static RoomView emptyLobby(String id) {
-        return new RoomView(id, LOBBY, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE);
+        return new RoomView(id, LOBBY, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true);
     }
 
     private static List<String> types(FakeSocket socket) {

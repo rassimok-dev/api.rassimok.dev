@@ -38,6 +38,7 @@ class ResponseHeadersTest {
     private static final String VERIFY_BODY = "{\"email\":\"nobody@example.com\",\"code\":\"123456\"}";
     private static final String READY_BODY = "{\"ready\":true}";
     private static final String LEVEL_BODY = "{\"level\":2,\"shape\":\"portrait\"}";
+    private static final String LISTED_BODY = "{\"listed\":false}";
 
     @TestHTTPResource("/clears")
     URI clearsUri;
@@ -76,9 +77,11 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/logout", null, null, 401, "no_session"),
                 Arguments.of("POST", "/presence", null, null, 401, "no_session"),
                 Arguments.of("GET", "/rooms/AAAAAAAAAA", null, null, 401, "no_session"),
-                Arguments.of("GET", "/rooms", null, null, 405, "method_not_allowed"),
+                Arguments.of("GET", "/rooms", null, null, 401, "no_session"),
+                Arguments.of("DELETE", "/rooms", null, null, 405, "method_not_allowed"),
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", "text/plain", "ready", 415, "unsupported_media_type"),
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/level", "application/*", "{\"level\":1}", 415, "unsupported_media_type"),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/listed", "text/plain", "listed", 415, "unsupported_media_type"),
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", "application/json", "{\"ready\":", 400, "bad_request"));
     }
 
@@ -101,7 +104,9 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", null, READY_BODY),
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", "application/octet-stream", READY_BODY),
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/level", null, LEVEL_BODY),
-                Arguments.of("POST", "/rooms/AAAAAAAAAA/level", "application/octet-stream", LEVEL_BODY));
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/level", "application/octet-stream", LEVEL_BODY),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/listed", null, LISTED_BODY),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/listed", "application/octet-stream", LISTED_BODY));
     }
 
     // A valid player body, so only the size can refuse it. The input stream
@@ -150,6 +155,18 @@ class ResponseHeadersTest {
 
         // then
         assertSecurityHeaders(response.statusCode(200));
+    }
+
+    @Test
+    void shouldSendSecurityHeaders_whenListRooms_givenSession() {
+        // given
+        String token = TestPlayers.createGuest("Lister", Rules.KIND_HUMAN);
+
+        // when
+        ValidatableResponse response = given().cookie(TestPlayers.COOKIE, token).when().get("/rooms").then();
+
+        // then
+        assertSecurityHeaders(response.statusCode(200)).contentType(ContentType.JSON);
     }
 
     @Test

@@ -24,6 +24,7 @@ public class RoomResource {
 
     private static final String FIELD_ID = "id";
     private static final String FIELD_READY = "ready";
+    private static final String FIELD_LISTED = "listed";
 
     @Inject
     Sessions sessions;
@@ -38,6 +39,13 @@ public class RoomResource {
         String id = rooms.create(LobbyPlayer.of(signedIn.player()));
         return Sessions.withRefreshedCookie(
                 RestResponse.ResponseBuilder.create(RestResponse.Status.CREATED, Map.of(FIELD_ID, id)), signedIn);
+    }
+
+    @GET
+    @Transactional
+    public RestResponse<RoomListView> list(@CookieParam(Sessions.COOKIE) String token) {
+        Sessions.SignedIn signedIn = sessions.require(token);
+        return Sessions.withRefreshedCookie(RestResponse.ResponseBuilder.ok(rooms.list()), signedIn);
     }
 
     @GET
@@ -96,6 +104,20 @@ public class RoomResource {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_SHAPE);
         }
         return ok(rooms.chooseLevel(id, LobbyPlayer.of(signedIn.player()), level, shape), signedIn);
+    }
+
+    @POST
+    @Path("/{id}/listed")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Transactional
+    public RestResponse<RoomView> listed(@PathParam(FIELD_ID) String id, JsonNode body,
+                                         @CookieParam(Sessions.COOKIE) String token) {
+        Sessions.SignedIn signedIn = sessions.require(token);
+        Boolean isListed = JsonFields.booleanValue(body, FIELD_LISTED);
+        if (null == isListed) {
+            throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_LISTED);
+        }
+        return ok(rooms.setListed(id, LobbyPlayer.of(signedIn.player()), isListed), signedIn);
     }
 
     @POST

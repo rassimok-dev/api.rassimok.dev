@@ -66,6 +66,7 @@ final class Rules {
     static final Duration PRESENCE_WINDOW = Duration.ofSeconds(60);
     static final int PRESENCE_MAX = 1_000;
     static final int ROOMS_MAX = 100;
+    static final int ROOMS_LISTED_MAX = 20;
     static final int ROOM_SIZE = 4;
     static final int ROOM_PLAYERS_TO_START = 2;
     static final int ROOM_ID_LENGTH = 10;

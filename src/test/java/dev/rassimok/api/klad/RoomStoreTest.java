@@ -14,6 +14,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
@@ -27,6 +28,7 @@ class RoomStoreTest {
     private static final String UNKNOWN_ID = "AAAAAAAAAA";
     private static final String LOBBY = "lobby";
     private static final String STARTING = "starting";
+    private static final String RACING = "racing";
     private static final Duration JUST_OVER_SILENCE = Rules.LOBBY_MEMBER_SILENCE.plusMillis(1);
 
     private final LobbyPlayer alice = player("Alice");
@@ -423,7 +425,7 @@ class RoomStoreTest {
 
         // then
         assertThat(room, equalTo(new RoomView(id, LOBBY, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE,
-                Rules.ROOM_SIZE)));
+                Rules.ROOM_SIZE, true)));
     }
 
     @Test
@@ -546,7 +548,7 @@ class RoomStoreTest {
 
         // then
         assertThat(room, equalTo(new RoomView(id, LOBBY, new RoomView.Host("Alice"),
-                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, false, true, true)), Rules.LEVEL_MAX, Rules.SHAPE_PORTRAIT, Rules.ROOM_SIZE)));
+                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, false, true, true)), Rules.LEVEL_MAX, Rules.SHAPE_PORTRAIT, Rules.ROOM_SIZE, true)));
     }
 
     @Test
@@ -813,7 +815,7 @@ class RoomStoreTest {
 
         // then
         assertThat(room, equalTo(new RoomView(id, LOBBY, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE,
-                Rules.ROOM_SIZE)));
+                Rules.ROOM_SIZE, true)));
     }
 
     @Test
@@ -842,6 +844,262 @@ class RoomStoreTest {
 
         // then
         assertNotFound(exception);
+    }
+
+    @Test
+    void shouldShowHostNickCountAndSettings_whenList_givenRoomWithTwoPlayers() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.chooseLevel(id, alice, Rules.LEVEL_MAX, Rules.SHAPE_PORTRAIT);
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(new RoomListView(List.of(new RoomListView.ListedRoom(id, LOBBY,
+                new RoomView.Host("Alice"), 2, Rules.ROOM_SIZE, Rules.LEVEL_MAX, Rules.SHAPE_PORTRAIT)))));
+    }
+
+    @Test
+    void shouldListFullRoom_whenList_givenRoomFull() {
+        // given
+        String id = fullRoom();
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(roomList(listed(id, LOBBY, alice, Rules.ROOM_SIZE))));
+    }
+
+    @Test
+    void shouldListStartingRoom_whenList_givenRoomStarting() {
+        // given
+        String id = startedRoom();
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(roomList(listed(id, STARTING, alice, 2))));
+    }
+
+    @Test
+    void shouldListRacingRoom_whenList_givenRoomRacing() {
+        // given
+        String id = startedRoom();
+        rooms.connect(id, alice.id(), new FakeSocket());
+        rooms.connect(id, bob.id(), new FakeSocket());
+        clock.advance(Rules.RACE_COUNTDOWN);
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(roomList(listed(id, RACING, alice, 2))));
+    }
+
+    @Test
+    void shouldLeaveOutEmptyRoom_whenList_givenEveryoneLeft() {
+        // given
+        String id = rooms.create(alice);
+        rooms.leave(id, alice);
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(roomList()));
+    }
+
+    @Test
+    void shouldLeaveOutRoom_whenList_givenHostSwitchedToLinkOnly() {
+        // given
+        String id = rooms.create(alice);
+        rooms.setListed(id, alice, false);
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(roomList()));
+    }
+
+    @Test
+    void shouldListRoomAgain_whenList_givenHostSwitchedBackToListed() {
+        // given
+        String id = rooms.create(alice);
+        rooms.setListed(id, alice, false);
+        rooms.setListed(id, alice, true);
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(roomList(listed(id, LOBBY, alice, 1))));
+    }
+
+    @Test
+    void shouldListMostPlayersFirstThenOldest_whenList() {
+        // given
+        LobbyPlayer frank = player("Frank");
+        LobbyPlayer grace = player("Grace");
+        String oldestSingleId = rooms.create(alice);
+        String pairId = rooms.create(bob);
+        rooms.join(pairId, carol);
+        String newerSingleId = rooms.create(dave);
+        String trioId = rooms.create(eve);
+        rooms.join(trioId, frank);
+        rooms.join(trioId, grace);
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(roomList(listed(trioId, LOBBY, eve, 3), listed(pairId, LOBBY, bob, 2),
+                listed(oldestSingleId, LOBBY, alice, 1), listed(newerSingleId, LOBBY, dave, 1))));
+    }
+
+    @Test
+    void shouldListTwentyRooms_whenList_givenMoreListedRooms() {
+        // given
+        List<LobbyPlayer> hosts = IntStream.range(0, Rules.ROOMS_LISTED_MAX + 5)
+                .mapToObj(i -> player("Host" + i))
+                .toList();
+        List<String> ids = hosts.stream().map(rooms::create).toList();
+        rooms.join(ids.getLast(), alice);
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        List<RoomListView.ListedRoom> expected = Stream.concat(
+                        Stream.of(listed(ids.getLast(), LOBBY, hosts.getLast(), 2)),
+                        IntStream.range(0, Rules.ROOMS_LISTED_MAX - 1)
+                                .mapToObj(i -> listed(ids.get(i), LOBBY, hosts.get(i), 1)))
+                .toList();
+        assertThat(list, equalTo(new RoomListView(expected)));
+    }
+
+    @Test
+    void shouldListTwentyRooms_whenList_givenOneHundredFiftyRoomsMadeAtOnce() throws Exception {
+        // given
+        List<Callable<Boolean>> creates = IntStream.range(0, Rules.ROOMS_MAX + 50)
+                .<Callable<Boolean>>mapToObj(i -> () -> isAccepted(() -> rooms.create(player("Host" + i))))
+                .toList();
+        countAccepted(creates);
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list.rooms().size(), equalTo(Rules.ROOMS_LISTED_MAX));
+    }
+
+    @Test
+    void shouldRemoveSilentMember_whenList_givenOnlyListReadsForMoreThan60Seconds() {
+        // given
+        rooms.create(alice);
+        clock.advance(Rules.LOBBY_MEMBER_SILENCE.minusSeconds(1));
+        rooms.list();
+        clock.advance(Duration.ofSeconds(1).plusMillis(1));
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(roomList()));
+    }
+
+    @Test
+    void shouldRemoveEmptyRoom_whenFind_givenListReadDuringItsTenMinutes() {
+        // given
+        String id = rooms.create(alice);
+        rooms.leave(id, alice);
+        clock.advance(Rules.EMPTY_ROOM_LIFETIME.minusMinutes(1));
+        rooms.list();
+        clock.advance(Duration.ofMinutes(1).plusMillis(1));
+
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.find(id, bob));
+
+        // then
+        assertNotFound(exception);
+    }
+
+    @Test
+    void shouldShowLinkOnly_whenSetListed_givenHost() {
+        // given
+        String id = rooms.create(alice);
+
+        // when
+        RoomView room = rooms.setListed(id, alice, false);
+
+        // then
+        assertThat(room, equalTo(linkOnly(room(id, LOBBY, alice, member(alice, false, true)))));
+    }
+
+    @Test
+    void shouldRefuseAndStayListed_whenSetListed_givenMemberWhoIsNotHost() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.setListed(id, bob, false));
+
+        // then
+        assertError(exception, Response.Status.FORBIDDEN, ApiException.NOT_HOST);
+        assertThat(rooms.list(), equalTo(roomList(listed(id, LOBBY, alice, 2))));
+    }
+
+    @Test
+    void shouldRefuse_whenSetListed_givenPlayerNotInRoom() {
+        // given
+        String id = rooms.create(alice);
+
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.setListed(id, bob, false));
+
+        // then
+        assertError(exception, Response.Status.FORBIDDEN, ApiException.NOT_HOST);
+    }
+
+    @Test
+    void shouldAnswerNotFound_whenSetListed_givenUnknownId() {
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.setListed(UNKNOWN_ID, alice, false));
+
+        // then
+        assertNotFound(exception);
+    }
+
+    @Test
+    void shouldSwitchToLinkOnly_whenSetListed_givenRoomStarting() {
+        // given
+        String id = startedRoom();
+
+        // when
+        RoomView room = rooms.setListed(id, alice, false);
+
+        // then
+        assertThat(room, equalTo(linkOnly(room(id, STARTING, alice, member(alice, true, true), member(bob, true, false)))));
+        assertThat(rooms.list(), equalTo(roomList()));
+    }
+
+    @Test
+    void shouldStayLinkOnly_whenLeave_givenHostOfLinkOnlyRoomLeaves() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.setListed(id, alice, false);
+
+        // when
+        rooms.leave(id, alice);
+
+        // then
+        assertThat(rooms.find(id, bob), equalTo(linkOnly(room(id, LOBBY, bob, member(bob, false, true)))));
     }
 
     private String fullRoom() {
@@ -918,6 +1176,20 @@ class RoomStoreTest {
                         : player)
                 .toList();
         return new RoomView(id, state, new RoomView.Host(host.nick()), seenPlayers, Rules.LEVEL_MIN,
-                Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE);
+                Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true);
+    }
+
+    private static RoomView linkOnly(RoomView room) {
+        return new RoomView(room.id(), room.state(), room.host(), room.players(), room.level(), room.shape(),
+                room.size(), false);
+    }
+
+    private static RoomListView roomList(RoomListView.ListedRoom... listed) {
+        return new RoomListView(List.of(listed));
+    }
+
+    private static RoomListView.ListedRoom listed(String id, String state, LobbyPlayer host, int players) {
+        return new RoomListView.ListedRoom(id, state, new RoomView.Host(host.nick()), players, Rules.ROOM_SIZE,
+                Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE);
     }
 }
