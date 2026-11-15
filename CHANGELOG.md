@@ -43,8 +43,11 @@ manages it) and the extension's own configuration keys, no code (Q2 A).
   failed mail send line has no `stack_trace` and no address. None can read a
   console, so they put the console settings on the log file. `JsonLogSettings`
   reads them from `application.properties` (every `quarkus.log.console.json.*`
-  key and `%prod...enabled`), so a dropped or mistyped console key fails the
-  tests.
+  key and `%prod...enabled`), so a dropped `enabled`, a mistyped
+  `key-overrides` or a changed `exception-output-type` fails the tests
+  (checked by mutation in review round 2). Not guarded: a mistyped
+  `excluded-keys` (the noise fields come back) and a dropped base
+  `enabled=false` (the `./mvnw test` console turns JSON).
 - Not yet known, to check after the deploy: the level names go out
   unchanged (`WARN`, `FATAL`, `SEVERE` may not be mapped by Cloud Logging;
   mapping them needs code), and the first stack trace line starts with ": "
