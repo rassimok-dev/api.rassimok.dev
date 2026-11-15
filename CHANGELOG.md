@@ -3,6 +3,188 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-15 - Open rooms listed at GET /rooms, link-only rooms, no members seen from outside
+
+The lobby can show the open rooms, so a player can enter one without an
+invite link (RAS-45, contract section 7; the site shows the list in
+RAS-46). The user answered every open question of the ticket on
+2026-11-15, each as recommended. The two reviews of the first version
+found that a listed id showed every member to anyone and that no room
+could be link only before it was listed; the link-only create and the
+outside view below fix that.
+
+- `GET /rooms` answers 200
+  `{"rooms":[{"id","state","host":{"nick"},"players","size","level","shape"}]}`:
+  every room with at least one member that its host has not made link
+  only, in `lobby`, `starting` or `racing`, full ones too; at most 20
+  (`Rules.ROOMS_LISTED_MAX`), the most players first, then the oldest.
+  `players` is a count here. An entry carries no player id, no email and
+  no nick but the host's. Empty and link-only rooms are never listed.
+  Joining from the list is the usual `POST /rooms/<id>/join`.
+- A new room is listed unless it is created link only (below).
+  `POST /rooms/<id>/listed` with
+  `{"listed":true|false}` switches it to link only and back and answers
+  the room, which now carries `"listed":true|false` for every member. Host
+  only: anyone else, member or not, gets 403 `not_host`, as for `level`
+  and `start`. Anything but a JSON boolean is 400 `invalid_listed`, checked
+  before the room; an unknown room is 404. It works in every state, and
+  the setting belongs to the room, so it stays through a host handover and
+  a race.
+- `POST /rooms?listed=false` makes the room link only from the start, so
+  it is never on the list, not even for one read. Without the parameter,
+  with `true` or with an empty value (Quarkus REST hands an empty value in
+  as none) the room is listed. Any other value, `False`, `0` and `yes`
+  included, is 400 `invalid_listed`, checked after the session and before
+  the room cap (401, then 400, then 429). The answer stays `{"id"}`.
+- To a player who is not a member, `GET /rooms/<id>` answers 200 with the
+  room as if it were empty: `"host":null` and `"players":[]`, with the id,
+  `state`, `level`, `shape`, `size` and `listed` as they are. This holds in
+  every state and for link-only rooms too (`Room.view`). The answers that
+  only a member gets (join, ready, level, listed, start) are unchanged. A
+  member silent for over 60 s who polls again now sees the room with no
+  members at all, not the room without themselves (2026-11-13, eighth).
+  By the reviews' reading of the site's `klad/lobby.js` (not run here),
+  the game's re-join needs only a 200 with the id, the state and no `you`
+  entry, which this keeps.
+- The list is built under `RoomStore`'s lock after the sweep every access
+  runs (`removeExpired`), and `list()` takes no player, so reading it is
+  not a heartbeat: nobody counts as seen, no empty room's 10 minutes start
+  again, and presence is not touched. The session is required (401
+  `no_session`) and refreshed once a day as on every endpoint; the three
+  headers of section 1 apply.
+- `RoomStore` keeps its rooms in a `LinkedHashMap` (creation order; a room
+  is put once, when it is made) and the list sorts them stably by player
+  count, so "then the oldest" needs no creation time and does not fall back
+  to hash order for rooms made in the same instant.
+- New record `RoomListView` (with `ListedRoom`, reusing `RoomView.Host`)
+  next to `RoomView`, which gains `listed`. Both are returned typed
+  (`RestResponse<...>`), as the other views, so the native image registers
+  them like the room.
+
+### Tests
+
+- Unit, fake clock: `RoomStoreTest` (+24): the whole entry with the host's
+  level and shape; full, `starting` and `racing` rooms listed; empty and
+  link-only rooms left out, listed again after the switch back; the order
+  (three players, two, then two rooms of one, the older first); 25 rooms
+  give 20, a newer room of two above the 19 oldest; 150 creates at once
+  still list 20; a member whom only list reads "see" is swept after 60 s;
+  an empty room read at 9 minutes is gone at 10 minutes and 1 ms; the
+  switch by the host, refused with 403 for a member (the room stays
+  listed) and for a stranger, 404 for an unknown room, allowed in
+  `starting`, kept through a host handover. A room created link only: its
+  whole answer has `listed` false, it is not listed, not even with two
+  members, and it is listed after the switch. A player who is not a member
+  reads a full, a `starting` and a link-only room with no members (whole
+  objects); the swept member's poll gets the same, while the host still
+  sees the whole room. Since an outsider sees no members at all, the test
+  that keeps silent members in `starting` now reads as a member, and the
+  read of a room everyone left comes from the player who left.
+- `RoomStoreRaceTest` (+1): an outsider reads a `racing` room with no
+  members. The reads that prove members are still in or gone now come from
+  the members themselves: after the race both are still in, after 60 s
+  more each one sees the room empty, and so do both after they left a
+  `starting` room or let 10 minutes pass after the results.
+- `@QuarkusTest`: `RoomResourceTest` adds both endpoints and
+  `POST /rooms?listed=yes` to the 401 cases (no cookie, unknown cookie),
+  an expired session for the list, the list's fields (only `rooms`, 1 to
+  20 entries, each with exactly the seven fields and `host` exactly
+  `{"nick"}`), a player who only reads the list missing from
+  `GET /presence`, and the switch (the whole room with `listed` false,
+  `not_host`, six bodies that are not a boolean, 404). It reads a lobby
+  room of two and a `starting` room from outside (whole objects with no
+  members), creates with `listed=false` (the whole room, `listed` false),
+  `true` and an empty value (listed), and refuses six other values with
+  400. The empty room after its only member left is now read by that
+  member. Every whole room it compares now has `listed`.
+- `RoomListTest` (new, with a test profile of its own, so a fresh
+  application holds only the rooms made there): a second player's list is
+  compared as a whole JSON object and the listed id joins the room; a room
+  seen on the list is gone from it after the switch to link only, and
+  after its only member leaves; a room created link only is never on it.
+  In the shared application the other classes leave many live rooms, full
+  ones from the socket tests among them, so a new room's place in a list
+  of 20 is not certain there, and a "left out" check would pass even
+  without the filter; `RoomResourceTest` checks only what holds whatever
+  else is in the store.
+- `LobbyCapsTest`: at the 100-room cap the list is the 20 oldest rooms,
+  compared whole, and `POST /rooms?listed=yes` is 400, not 429. The room
+  tests fill the store with the same 100 hosts: whichever runs first, the
+  next fill replaces each host's room, and the store holds exactly the
+  cap.
+- `ResponseHeadersTest`: `GET /rooms` was a 405 case and is now 401
+  `no_session` (the 405 case moved to `DELETE /rooms`); the three headers
+  on a 200 list; the 415 cases for `listed`.
+- Native: `RoomResourceIT` and `ResponseHeadersIT` run the new cases
+  against the binary (the JSON of the new records, the outside view, the
+  query parameter). `RoomListTest` has no native twin; `RoomResourceIT`
+  checks every entry's fields there.
+
+### Decisions worth not relitigating
+
+- **The room id stops being the key.** Until now 60 random bits in the
+  link decided who could enter. A listed room is open to every signed-in
+  player, and `POST /players` has no limit, so that is anyone. A room for
+  friends only is created link only (`POST /rooms?listed=false`). Switching
+  a listed room to link only later hides it from the lists after the
+  switch, but does not take back an id already seen: whoever read the list
+  before can still join it while it is in `lobby` with a free place.
+- **New facts shown to others:** who hosts a room (the nick) and how many
+  are in it, to every signed-in player. The lobby's note on what other
+  players see must say so (site, RAS-46). Member nicks, kinds and ready
+  marks are shown only to the room's members: a player outside reads any
+  room, listed or not, in any state, with no members, so neither the list
+  nor a listed id shows who plays with whom. The limit: a player who joins
+  a listed `lobby` room with a free place is a member and sees the others,
+  and can leave at once; the members see them only if one of their polls
+  lands in between. So a full, `starting` or `racing` room cannot be read
+  from outside, but a joinable one can, by joining.
+- **A stranger can block Start** (accepted, user 2026-11-15). Start needs
+  every member ready, and a member who joins from the list, never presses
+  Ready and keeps polling is never swept; until now that took the link.
+  Link only does not remove someone already in. The host's way out is a
+  new room created link only (`POST /rooms?listed=false`), which closes the
+  old one and is never on the list. A new listed room switched afterwards
+  does not help against a stranger who keeps polling: it is on the list
+  with the host's nick from its first moment. A host who removes a member
+  would be its own ticket.
+- **Junk rooms at the cap** (still open, not decided here). About 100
+  fresh guests can fill the 100-room cap for about 11 minutes. The list
+  shows only rooms whose members still poll: an abandoned junk room leaves
+  the list when its member is swept after 60 s, though it holds its place
+  under the cap. Junk hosts that keep polling stay on the list with their
+  nicks, up to 20 in every lobby, but below any room of two or more. That
+  holds only for rooms of one: 80 fresh guests in 20 full rooms of 4, each
+  polling at least once a minute, take every place on the list, so it
+  shows no room one can enter. That needs fewer sessions than the cap fill
+  (80, not 100), but all of them must keep polling. It stays open with the
+  cap fill; listing joinable rooms first would change the order the user
+  chose (most players first), so it is not done here.
+- **Request cost.** A lobby tab outside a room goes from about 240 to about
+  360 requests an hour (one `GET /rooms` every 30 s), so the 100,000 a day
+  Workers quota covers about 275 tab hours a day outside a room instead of
+  415. Inside a room nothing changes; the site lists rooms only while the
+  player is in no room. Each list read also reads the session from Neon,
+  like every request.
+- **The switch, decided here:** `POST /rooms/<id>/listed` with a boolean,
+  shaped like `ready`, guarded like `level` (403 `not_host` to everyone but
+  the host), but not lobby-only: the flag changes only the list, so there
+  is nothing to protect in a race.
+- **The link-only create, decided here:** a query parameter, because
+  `POST /rooms` ignores any body and its type (contract section 1) and the
+  proxy keeps the query string. Only the exact words `true` and `false`
+  count, so a typo is refused instead of guessed; the default stays listed
+  (the user's answer), and the site can offer the choice before the room
+  is made (RAS-46).
+- **The outside view, decided here:** `host` null and `players` empty, the
+  answer of an empty room, rather than a 404 or the host's nick. By the
+  reviews' reading of the site code (not run here), a 404 would break the
+  game's re-join of a swept member, which reads the room first, while the
+  empty answer is one the game already gets for an empty room. Without the
+  host's nick, an old id of a link-only room shows nobody. It applies to
+  every room, not only listed ones, because a switch to link only does not
+  take back an id already seen.
+
 ## 2026-11-13 (ninth) - Race socket at /race/<room>, the echo spike removed
 
 Players in a room race on their own copies of the same level, and the API

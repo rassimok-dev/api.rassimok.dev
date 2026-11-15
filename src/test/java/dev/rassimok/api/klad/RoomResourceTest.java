@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -32,10 +33,14 @@ import java.util.stream.Stream;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.aMapWithSize;
+import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.emptyString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.nullValue;
@@ -55,6 +60,8 @@ class RoomResourceTest {
     private static final String STARTING = "starting";
     private static final String READY = "{\"ready\":true}";
     private static final String LEVEL = "{\"level\":4,\"shape\":\"portrait\"}";
+    private static final String LINK_ONLY = "{\"listed\":false}";
+    private static final Set<String> LIST_FIELDS = Set.of("id", "state", "host", "players", "size", "level", "shape");
 
     @TestHTTPResource("/rooms/" + UNKNOWN_ID + "/ready")
     URI unknownReadyUri;
@@ -66,11 +73,14 @@ class RoomResourceTest {
                 Arguments.of("POST", "/presence", null),
                 Arguments.of("GET", "/presence", null),
                 Arguments.of("POST", "/rooms", null),
+                Arguments.of("POST", "/rooms?listed=yes", null),
+                Arguments.of("GET", "/rooms", null),
                 Arguments.of("GET", "/rooms/" + UNKNOWN_ID, null),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/join", null),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/leave", null),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/ready", READY),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/level", LEVEL),
+                Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/listed", LINK_ONLY),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/start", null));
     }
 
@@ -87,6 +97,7 @@ class RoomResourceTest {
         return Stream.of(
                 Arguments.of("/ready", READY),
                 Arguments.of("/level", LEVEL),
+                Arguments.of("/listed", LINK_ONLY),
                 Arguments.of("/start", null));
     }
 
@@ -352,15 +363,45 @@ class RoomResourceTest {
     }
 
     @Test
-    void shouldShowEmptyRoom_whenFind_givenOnlyMemberLeft() {
+    void shouldShowNoMembers_whenFind_givenPlayerNotInRoom() {
+        // given
+        String id = createRoom(guest(HOST));
+        join(guest(GUEST), id).statusCode(200);
+
+        // when
+        ValidatableResponse found = find(guest("Outsider"), id);
+
+        // then
+        found.statusCode(200).body("", equalTo(seenFromOutside(id, LOBBY)));
+    }
+
+    @Test
+    void shouldShowNoMembers_whenFind_givenPlayerNotInStartingRoom() {
         // given
         String host = guest(HOST);
         String other = guest(GUEST);
         String id = createRoom(host);
+        join(other, id).statusCode(200);
+        postJson(host, "/rooms/" + id + "/ready", READY).statusCode(200);
+        postJson(other, "/rooms/" + id + "/ready", READY).statusCode(200);
+        post(host, "/rooms/" + id + "/start").statusCode(200);
+
+        // when
+        ValidatableResponse found = find(guest("Outsider"), id);
+
+        // then
+        found.statusCode(200).body("", equalTo(seenFromOutside(id, STARTING)));
+    }
+
+    @Test
+    void shouldShowEmptyRoom_whenFind_givenOnlyMemberLeft() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
         post(host, "/rooms/" + id + "/leave").statusCode(204);
 
         // when
-        ValidatableResponse found = find(other, id);
+        ValidatableResponse found = find(host, id);
 
         // then
         Map<String, Object> expected = new HashMap<>();
@@ -371,6 +412,7 @@ class RoomResourceTest {
         expected.put("level", Rules.LEVEL_MIN);
         expected.put("shape", Rules.SHAPE_LANDSCAPE);
         expected.put("size", Rules.ROOM_SIZE);
+        expected.put("listed", true);
         found.statusCode(200).body("", equalTo(expected));
     }
 
@@ -500,7 +542,7 @@ class RoomResourceTest {
         // then
         response.statusCode(200).body("", equalTo(Map.of("id", id, "state", LOBBY, "host", Map.of("nick", HOST),
                 "players", List.of(withYou(member(HOST, false, true))), "level", 4, "shape", Rules.SHAPE_PORTRAIT,
-                "size", Rules.ROOM_SIZE)));
+                "size", Rules.ROOM_SIZE, "listed", true)));
     }
 
     @Test
@@ -609,6 +651,132 @@ class RoomResourceTest {
     }
 
     @Test
+    void shouldAnswerNoSession_whenListRooms_givenExpiredSession() throws SQLException {
+        // given
+        String token = guest(HOST);
+        TestSql.execute(TestSql.devServicesDatabase(devServices),
+                "update session set expires_at = now() - interval '1 second' where token_hash = ?",
+                Sessions.hash(token));
+
+        // when
+        ValidatableResponse response = listRooms(token);
+
+        // then
+        response.statusCode(401).body("", equalTo(Map.of("error", ApiException.NO_SESSION)));
+    }
+
+    // Other tests' rooms share this store and may take all 20 places, so this
+    // checks the fields of every entry; RoomListTest checks which rooms are listed.
+    @Test
+    void shouldShowOnlyListFields_whenListRooms_givenRoomOfOtherPlayer() {
+        // given
+        createRoom(guest(HOST));
+
+        // when
+        ValidatableResponse response = listRooms(guest(GUEST));
+
+        // then
+        response.statusCode(200).body("", aMapWithSize(1));
+        List<Map<String, Object>> entries = response.extract().path("rooms");
+        List<Map<String, Object>> hosts = response.extract().path("rooms.host");
+        assertThat(entries.size(), allOf(greaterThan(0), lessThanOrEqualTo(Rules.ROOMS_LISTED_MAX)));
+        assertThat(entries.stream().map(Map::keySet).toList(), everyItem(equalTo(LIST_FIELDS)));
+        assertThat(hosts.stream().map(Map::keySet).toList(), everyItem(equalTo(Set.of("nick"))));
+    }
+
+    @Test
+    void shouldLeavePresenceUnchanged_whenListRooms_givenPlayerOnlyReadsList() {
+        // given
+        String readerNick = TestPlayers.uniqueNick("Reader");
+        String reader = guest(readerNick);
+
+        // when
+        listRooms(reader).statusCode(200);
+
+        // then
+        given().cookie(TestPlayers.COOKIE, guest(GUEST)).when().get("/presence").then().statusCode(200)
+                .body("players.nick", not(hasItem(readerNick)));
+    }
+
+    @Test
+    void shouldShowLinkOnly_whenListed_givenHost() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+
+        // when
+        ValidatableResponse response = postJson(host, "/rooms/" + id + "/listed", LINK_ONLY);
+
+        // then
+        response.statusCode(200).body("", equalTo(linkOnly(room(id, LOBBY, HOST, List.of(member(HOST, false, true))))));
+    }
+
+    @Test
+    void shouldAnswerNotHost_whenListed_givenOtherPlayer() {
+        // given
+        String id = createRoom(guest(HOST));
+        String other = guest(GUEST);
+        join(other, id).statusCode(200);
+
+        // when
+        ValidatableResponse response = postJson(other, "/rooms/" + id + "/listed", LINK_ONLY);
+
+        // then
+        response.statusCode(403).body("", equalTo(Map.of("error", ApiException.NOT_HOST)));
+    }
+
+    // The body is checked before the room, so an unknown id is enough here.
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"listed\":\"false\"}", "{\"listed\":0}", "{\"listed\":null}", "{}", "[false]", "false"})
+    void shouldAnswerInvalidListed_whenListed_givenNoBoolean(String body) {
+        // when
+        ValidatableResponse response = postJson(guest("Lister"), "/rooms/" + UNKNOWN_ID + "/listed", body);
+
+        // then
+        response.statusCode(400).body("", equalTo(Map.of("error", ApiException.INVALID_LISTED)));
+    }
+
+    @Test
+    void shouldMakeLinkOnlyRoom_whenCreateRoom_givenListedFalse() {
+        // given
+        String token = guest(HOST);
+
+        // when
+        ValidatableResponse created = postRooms(token, "false");
+
+        // then
+        String id = created.statusCode(201).body("", aMapWithSize(1)).extract().path("id");
+        find(token, id).statusCode(200)
+                .body("", equalTo(linkOnly(room(id, LOBBY, HOST, List.of(member(HOST, false, true))))));
+    }
+
+    // The framework hands an empty value in as no value, so it means listed too.
+    @ParameterizedTest
+    @ValueSource(strings = {"true", ""})
+    void shouldMakeListedRoom_whenCreateRoom_givenListedTrueOrEmpty(String listed) {
+        // given
+        String token = guest(HOST);
+
+        // when
+        ValidatableResponse created = postRooms(token, listed);
+
+        // then
+        String id = created.statusCode(201).body("", aMapWithSize(1)).extract().path("id");
+        find(token, id).statusCode(200)
+                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, false, true)))));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"yes", "False", "TRUE", "0", "1", " "})
+    void shouldAnswerInvalidListed_whenCreateRoom_givenNeitherTrueNorFalse(String listed) {
+        // when
+        ValidatableResponse response = postRooms(guest("Creator"), listed);
+
+        // then
+        response.statusCode(400).body("", equalTo(Map.of("error", ApiException.INVALID_LISTED)));
+    }
+
+    @Test
     void shouldResendCookie_whenFindRoom_givenSessionOlderThanADay() throws SQLException {
         // given
         String token = guest(HOST);
@@ -632,6 +800,14 @@ class RoomResourceTest {
         return given().cookie(TestPlayers.COOKIE, token)
                 .when().post("/rooms")
                 .then().statusCode(201).extract().path("id");
+    }
+
+    private static ValidatableResponse postRooms(String token, String listed) {
+        return given().cookie(TestPlayers.COOKIE, token).queryParam("listed", listed).when().post("/rooms").then();
+    }
+
+    private static ValidatableResponse listRooms(String token) {
+        return given().cookie(TestPlayers.COOKIE, token).when().get("/rooms").then();
     }
 
     private static ValidatableResponse find(String token, String id) {
@@ -671,12 +847,31 @@ class RoomResourceTest {
                 .map(player -> viewerNick.equals(player.get("nick")) ? withYou(player) : player)
                 .toList();
         return Map.of("id", id, "state", state, "host", Map.of("nick", hostNick), "players", seenPlayers,
-                "level", Rules.LEVEL_MIN, "shape", Rules.SHAPE_LANDSCAPE, "size", Rules.ROOM_SIZE);
+                "level", Rules.LEVEL_MIN, "shape", Rules.SHAPE_LANDSCAPE, "size", Rules.ROOM_SIZE, "listed", true);
+    }
+
+    private static Map<String, Object> seenFromOutside(String id, String state) {
+        Map<String, Object> room = new HashMap<>();
+        room.put("id", id);
+        room.put("state", state);
+        room.put("host", null);
+        room.put("players", List.of());
+        room.put("level", Rules.LEVEL_MIN);
+        room.put("shape", Rules.SHAPE_LANDSCAPE);
+        room.put("size", Rules.ROOM_SIZE);
+        room.put("listed", true);
+        return room;
     }
 
     private static Map<String, Object> withYou(Map<String, Object> player) {
         Map<String, Object> you = new HashMap<>(player);
         you.put("you", true);
         return you;
+    }
+
+    private static Map<String, Object> linkOnly(Map<String, Object> room) {
+        Map<String, Object> linkOnly = new HashMap<>(room);
+        linkOnly.put("listed", false);
+        return linkOnly;
     }
 }
