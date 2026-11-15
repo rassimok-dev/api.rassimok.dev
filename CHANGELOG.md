@@ -20,8 +20,9 @@ not reach players before that.
   as stored: `{"n","member","nick","kind","guest","you","text"}`. Only a
   member may send (Q1 a); every member does, guests and accounts, humans
   and agents (Q3 a). It works in every state, so RAS-55 can build on it.
-  `n` counts up from 1 in each room with no gaps (under `RoomStore`'s
-  lock). `member`, `nick`, `kind` and `guest` are the sender's at the
+  `n` counts up from 1 in each room (under `RoomStore`'s lock) and is never
+  given again; a message removed with its deleted sender (below) leaves a
+  gap. `member`, `nick`, `kind` and `guest` are the sender's at the
   moment of sending and come from the server, so a message cannot fake its
   sender; `you` marks the caller's own messages (Q7 c). No player id and no
   email leave the API.
@@ -56,16 +57,19 @@ not reach players before that.
 - What is kept (Q4 a): the last 30 messages of each room, in `Room`, in
   memory only; the 31st drops the oldest. They go with the room (10
   minutes after it empties, or when its host opens a new room) and with
-  every restart or deploy. Nothing is written to the database (no
-  migration) and nothing to a log line, also not on an error.
+  every restart or deploy. A deleted player's messages go from every room
+  at once (below). Nothing is written to the database (no migration) and
+  nothing to a log line, also not on an error.
 - Errors, checked in the order of section 7: 401 `no_session`; 400
   `invalid_message`, or `invalid_query` for an `after` that is not 1 to 9
   ASCII digits; 404 `not_found` for an unknown room and for a non-member;
   429 `rate_limited`; 415 and 413 as in contract section 1 (the send reads
   a JSON body, so the 415 filter and the 4 KB limit apply).
 - Code: `RoomResource` (the POST, the `after` query), `RoomStore.send` and
-  `find(..., after)` under the lock, `Room` (the chat list, `n`, the member
-  number, the rate window), `RoomView` (`messages`, `member`, the new
+  `find(..., after)` under the lock, `RoomStore.forgetDeleted` (called by
+  `DELETE /players/me` and the merge in `login/verify`; logout keeps
+  `forget`), `Room` (the chat list, `n`, the member number, the rate
+  window, `removeMessagesOf`), `RoomView` (`messages`, `member`, the new
   `Message` record, returned typed on the 201 so the native image
   registers it), `ChatTexts`, `Rules`, `ApiException.INVALID_MESSAGE`.
 
@@ -95,10 +99,14 @@ not reach players before that.
   chat is text written by strangers. The text is one line from the
   allow-list, and the nick and marks come from the server, so a message
   cannot imitate a second message or another sender.
-- **A sent message cannot be taken back.** A member who leaves, logs out
-  or deletes their player leaves their messages in the room, under the
-  nick they were sent with, until 30 newer ones push them out or the room
-  goes. The message keeps no player id, only the member number.
+- **Only deleting the player takes a message back.** Deleting the player,
+  or a merge that deletes the guest, removes their messages from every
+  room at once. A member who leaves or logs out, or a guest turned into a
+  new account, leaves their messages in the room, under the nick and marks
+  they were sent with, until 30 newer ones push them out or the room goes.
+  The stored message keeps the sender's player id for that, in memory
+  only; it never leaves the API. A game page that already showed a
+  removed message keeps it until it reloads, as the API cannot recall it.
 - **The privacy promise.** The site says what the server keeps: a nick,
   the choice of human or agent, results, and an email for an account. Chat
   messages are new. Both rules files say the note changes before the API
@@ -144,7 +152,11 @@ not reach players before that.
     few hundred KB for the rate windows; that is less than the spread
     between two runs of one row. Against the 20-socket flood's 228.7 MiB
     (2026-11-13, ninth) the chat adds about 2 MiB at most, and no row came
-    near the 80 % line (204.8 MiB) used for RAS-43.
+    near the 80 % line (204.8 MiB) used for RAS-43. The sender's player id
+    on each kept message came after this measurement (the deletion
+    decision below): by reasoning about 40 bytes more per message (a
+    reference and its own UUID), about 120 KB for the 3,000; not measured
+    again.
 
 ### Tests
 
@@ -159,7 +171,7 @@ not reach players before that.
   the normalised form (spaces, fullwidth, U+00A0 to a space, U+2026 to
   three dots, a trailing line break trimmed), and a text that grows past
   120 under NFKC.
-- Unit, fake clock: `RoomStoreTest` (+26): the stored message and the
+- Unit, fake clock: `RoomStoreTest` (+33): the stored message and the
   sender's marks, whole rooms for the sender and another member; an agent
   account (`kind` agent, `guest` false); two twins told apart by `member`;
   the nick kept as sent after a rename; 404 for a non-member, a member who
@@ -175,11 +187,20 @@ not reach players before that.
   it; each member counts apart; a send counts as seen (a member who only
   sends is not swept); 50 sends from all 10 members at once on 16 threads
   get the numbers 1 to 50 with no gap or repeat, and the room keeps 21 to
-  50 in order. Every existing whole-room comparison now carries `member`
-  and `messages`; after a leave or a handover the numbers are not the list
-  positions (Bob stays 2), which the tests pin. `RoomStoreRaceTest` (+1): a
+  50 in order. `forgetDeleted`, each compared as the whole room another
+  member then reads: a deleted member's messages go and the others' keep
+  their numbers; also after an explicit leave, after a move to another
+  room (both rooms lose them), after the 60 s sweep, and under an old and
+  a new member number after a leave and a join; the next message takes
+  the next number, not a removed one; `forget` (logout) keeps them. Every
+  existing whole-room comparison now carries `member` and `messages`;
+  after a leave or a handover the numbers are not the list positions (Bob
+  stays 2), which the tests pin. `RoomStoreRaceTest` (+1): a
   send in `racing` is kept and sends nothing over the race sockets.
-- `@QuarkusTest`: `RoomResourceTest` (+43): the send and
+- `@QuarkusTest`: `RoomResourceTest` (+45): a player who sent, left and
+  then sent `DELETE /players/me` is gone from the other member's next read
+  (whole JSON, the host's later message keeps `n` 2); after a logout the
+  message stays; the send and
   `GET /rooms/<id>?after=x` in the 401 lists (no cookie, unknown cookie),
   an expired session on a send; whole JSON answers of the send (201, no
   cookie resent) and of both members' reads; `after` 1 and 2, an empty
@@ -194,6 +215,11 @@ not reach players before that.
   field, a player id or an email fails. `ResponseHeadersTest` (+7): the
   three headers on 201, 400 and 429 of the send, plus 401, 415 and 400
   `bad_request` cases and the two bodies without a JSON type.
+  `LoginResourceTest` (+2, JVM only, as it reads the code from the mock
+  mailbox): a guest who sent and is merged into an existing account of the
+  same kind is gone with their messages from the host's read; a guest
+  turned into a new account stays, with the message as sent
+  (`guest` true).
 - `ChatLogTest` (new, JVM only, under `JsonLogProfile`, so the lines are
   the production JSON format written to a file): one marker text goes
   through a chunked 413, five accepted sends, a 429, a 121-character, a
@@ -210,17 +236,29 @@ not reach players before that.
 
 ### Decisions worth not relitigating
 
-- **A deleted player's nick and text stay in the room's chat**, decided
-  here. Deleting the player, a merge and a logout still remove the member
-  at once (2026-11-13, eighth: "so a deleted nick does not linger"), but
-  the messages they sent stay, under the nick they were sent with, until
-  30 newer ones push them out or the room goes (at most 10 minutes after
-  it empties). Reason: the ticket's note must say that a sent message
-  cannot be taken back (Q9), and a message holds no player id. The
-  alternative, if the user prefers it: `forget` also drops the leaving
-  member's messages, by the member number it knows at that moment (a
-  small change in `Room`). RAS-54's chat note and the "delete my nick and
-  results" wording must say which one holds.
+- **Deleting a player removes their chat messages from every room at
+  once**, decided by the main session in this run (2026-11-15, under the
+  user's in-ticket approval), after the review found the first build kept
+  them. That covers `DELETE /players/me` and the `login/verify` merge
+  that deletes a guest of the same kind (`RoomStore.forgetDeleted`); a
+  leave, a logout (`forget`) and a guest turned into a new account (the
+  same player, so neither is called) keep them. Reason: the live privacy
+  page says the server deletes the nick, and the 2026-11-13 (eighth) rule
+  removes a deleted player from their room "so a deleted nick does not
+  linger"; a message carries that nick. The match is by player id, kept
+  on the stored message in memory only, not by member number: at deletion
+  the player has usually left the room already (the lobby leaves it on
+  close, the 60 s sweep removes a silent member), may have sent in other
+  rooms, and gets a new number on each join. Membership and messages go
+  under the one lock, so a send already in flight is either removed or
+  finds no member (404). The counter is not reset, so a removed number is
+  never given again and `after` still holds; a reader sees a gap. A page
+  that already showed a removed message keeps it until it reloads; the
+  API cannot recall it, and RAS-54's note must say "removed from the
+  server", not more. As for presence (2026-11-13, eighth), a join and a
+  send of the same player whose session was read before the delete
+  committed can still land after it; such a message then lives until 30
+  newer ones or the room's end. Accepted as there.
 - **The allow-list, decided here.** Printable ASCII, the Russian Cyrillic
   letters (the nick alphabet's), and the guillemets, curly quotes and en
   and em dashes that phone keyboards insert by themselves; without those,
@@ -251,14 +289,17 @@ not reach players before that.
   so a leave and a join does not reset it (it would have made 5 messages
   cost 7 requests). Entries older than the window are dropped on every
   send in the room, so the map holds at most the players who sent in the
-  last 10 s. Only accepted messages count; a refused one (400, 404, 429)
-  counts neither toward the window nor as seen. An accepted one counts as
-  seen, like every successful room request of a member.
+  last 10 s; a deleted player's entry goes at once with their messages.
+  Only accepted messages count; a refused one (400, 404, 429) counts
+  neither toward the window nor as seen. An accepted one counts as seen,
+  like every successful room request of a member.
 - **A message keeps the sender's nick, kind and guest mark of the moment
   of sending** (from the request's player, not the member entry, which
-  could be stale after a login), and the member number, never the player
-  id. `you` compares member numbers, which is exact because a member reads
-  only messages sent after their own join.
+  could be stale after a login), and the member number. The player id
+  stays on the stored message only, for the deletion above; the answer
+  record `RoomView.Message` has no field for it. `you` compares member
+  numbers, which is exact because a member reads only messages sent after
+  their own join.
 - **Sending is allowed in every state**, `starting` and `racing` too, so
   RAS-55 can build on it. Nothing is sent over the race socket yet.
 

@@ -115,10 +115,18 @@ public class RoomStore {
         }
     }
 
-    // The player is gone for good (deleted, merged or signed out): out of
-    // their room in any state, with the host handover of a leave.
+    // The player signed out: out of their room in any state, with the host
+    // handover of a leave. Their chat messages stay.
     synchronized void forget(UUID playerId) {
         leaveCurrentRoom(playerId, clock.instant());
+    }
+
+    // The player is deleted (also a guest merged into an account): out of
+    // their room, and their chat messages out of every room, under the one
+    // lock, so a send in flight is either removed here or finds no member.
+    synchronized void forgetDeleted(UUID playerId) {
+        leaveCurrentRoom(playerId, clock.instant());
+        rooms.values().forEach(room -> room.removeMessagesOf(playerId));
     }
 
     // To a player who is not in it, the room is not found.

@@ -80,8 +80,10 @@ final class Room {
     }
 
     // A chat message as stored: the sender's member number, nick and marks
-    // at the time of sending, never their player id.
-    private record ChatMessage(int n, int member, String nick, String kind, boolean isGuest, String text) {
+    // at the time of sending. The player id stays here, so a deleted
+    // player's messages can go; it never leaves the API.
+    private record ChatMessage(int n, UUID senderId, int member, String nick, String kind, boolean isGuest,
+                               String text) {
 
         RoomView.Message seenBy(Member viewer) {
             return new RoomView.Message(n, member, nick, kind, isGuest, viewer.number == member, text);
@@ -262,13 +264,20 @@ final class Room {
     RoomView.Message send(Member sender, LobbyPlayer player, String text, Instant now) {
         recentMessages.computeIfAbsent(player.id(), playerId -> new ArrayDeque<>()).addLast(now);
         lastMessageNumber++;
-        ChatMessage message = new ChatMessage(lastMessageNumber, sender.number, player.nick(), player.kind(),
-                player.isGuest(), text);
+        ChatMessage message = new ChatMessage(lastMessageNumber, player.id(), sender.number, player.nick(),
+                player.kind(), player.isGuest(), text);
         chat.addLast(message);
         if (Rules.CHAT_MESSAGES_KEPT < chat.size()) {
             chat.removeFirst();
         }
         return message.seenBy(sender);
+    }
+
+    // The counter stays, so a removed number is never given again and a
+    // reader's `after` still holds.
+    void removeMessagesOf(UUID playerId) {
+        chat.removeIf(message -> playerId.equals(message.senderId()));
+        recentMessages.remove(playerId);
     }
 
     // Only for a room with members, as the list never shows an empty one.

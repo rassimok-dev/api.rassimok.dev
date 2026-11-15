@@ -1633,6 +1633,149 @@ class RoomStoreTest {
                 equalTo(IntStream.rangeClosed(sent - Rules.CHAT_MESSAGES_KEPT + 1, sent).boxed().toList()));
     }
 
+    @Test
+    void shouldRemoveOnlyTheirMessages_whenForgetDeleted_givenMember() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.join(id, carol);
+        rooms.send(id, bob, "one");
+        rooms.send(id, alice, "two");
+        rooms.send(id, bob, "three");
+        rooms.send(id, carol, "four");
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true), member(carol, 3, false, false)),
+                message(2, alice, 1, true, "two"),
+                message(4, carol, 3, false, "four"))));
+    }
+
+    @Test
+    void shouldRemoveTheirMessages_whenForgetDeleted_givenPlayerLeftRoomEarlier() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, "one");
+        rooms.send(id, alice, "two");
+        rooms.leave(id, bob);
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(2, alice, 1, true, "two"))));
+    }
+
+    @Test
+    void shouldRemoveTheirMessagesFromBothRooms_whenForgetDeleted_givenPlayerMovedToOtherRoom() {
+        // given
+        String firstId = rooms.create(alice);
+        rooms.join(firstId, bob);
+        rooms.send(firstId, bob, "in the first");
+        rooms.send(firstId, alice, "stays in the first");
+        String secondId = rooms.create(carol);
+        rooms.join(secondId, bob);
+        rooms.send(secondId, carol, "stays in the second");
+        rooms.send(secondId, bob, "in the second");
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(firstId, alice), equalTo(withMessages(
+                room(firstId, LOBBY, alice, member(alice, 1, false, true)),
+                message(2, alice, 1, true, "stays in the first"))));
+        assertThat(rooms.find(secondId, carol), equalTo(withMessages(
+                room(secondId, LOBBY, carol, member(carol, 1, false, true)),
+                message(1, carol, 1, true, "stays in the second"))));
+    }
+
+    @Test
+    void shouldRemoveTheirMessages_whenForgetDeleted_givenPlayerRemovedAfterSilence() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, "one");
+        rooms.send(id, alice, "two");
+        clock.advance(Duration.ofSeconds(30));
+        rooms.find(id, alice);
+        clock.advance(Duration.ofSeconds(30).plusMillis(1));
+        rooms.find(id, alice);
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(2, alice, 1, true, "two"))));
+    }
+
+    @Test
+    void shouldRemoveMessagesUnderEveryNumber_whenForgetDeleted_givenPlayerLeftAndCameBack() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, "first visit");
+        rooms.leave(id, bob);
+        rooms.send(id, alice, "while away");
+        rooms.join(id, bob);
+        rooms.send(id, bob, "back");
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(2, alice, 1, true, "while away"))));
+    }
+
+    @Test
+    void shouldGiveNextNumber_whenSend_givenDeletedPlayersLastMessagesRemoved() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, alice, "one");
+        rooms.send(id, bob, "two");
+        rooms.send(id, bob, "three");
+        rooms.forgetDeleted(bob.id());
+
+        // when
+        RoomView.Message sent = rooms.send(id, alice, "four");
+
+        // then
+        assertThat(sent, equalTo(message(4, alice, 1, true, "four")));
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(1, alice, 1, true, "one"),
+                message(4, alice, 1, true, "four"))));
+    }
+
+    @Test
+    void shouldKeepTheirMessages_whenForget_givenMemberSent() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, "one");
+        rooms.send(id, alice, "two");
+
+        // when
+        rooms.forget(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(1, bob, 2, false, "one"),
+                message(2, alice, 1, true, "two"))));
+    }
+
     private String fullRoom() {
         String id = rooms.create(alice);
         fullRoomPlayers.stream().skip(1).forEach(player -> rooms.join(id, player));

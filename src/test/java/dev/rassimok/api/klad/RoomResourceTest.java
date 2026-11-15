@@ -938,6 +938,46 @@ class RoomResourceTest {
         found.statusCode(200).body("", equalTo(seenFromOutside(id, LOBBY)));
     }
 
+    // The lobby leaves the room when it closes, so a player usually deletes
+    // their nick from outside it.
+    @Test
+    void shouldRemoveTheirMessages_whenDeleteAccount_givenPlayerSentAndLeftRoom() {
+        // given
+        String host = guest(HOST);
+        String leaving = guest(GUEST);
+        String id = createRoom(host);
+        join(leaving, id).statusCode(200);
+        send(leaving, id, MESSAGE).statusCode(201);
+        send(host, id, "{\"text\":\"bye\"}").statusCode(201);
+        post(leaving, "/rooms/" + id + "/leave").statusCode(204);
+
+        // when
+        given().cookie(TestPlayers.COOKIE, leaving).when().delete("/players/me").then().statusCode(204);
+
+        // then
+        find(host, id).statusCode(200).body("", equalTo(withMessages(
+                room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true))),
+                chatMessage(2, 1, HOST, true, "bye"))));
+    }
+
+    @Test
+    void shouldKeepTheirMessages_whenLogout_givenPlayerSentInRoom() {
+        // given
+        String host = guest(HOST);
+        String leaving = guest(GUEST);
+        String id = createRoom(host);
+        join(leaving, id).statusCode(200);
+        send(leaving, id, MESSAGE).statusCode(201);
+
+        // when
+        post(leaving, "/logout").statusCode(204);
+
+        // then
+        find(host, id).statusCode(200).body("", equalTo(withMessages(
+                room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true))),
+                chatMessage(1, 2, GUEST, false, LEVEL_THREE))));
+    }
+
     @Test
     void shouldAnswerNotFound_whenSend_givenPlayerNotInRoom() {
         // given
