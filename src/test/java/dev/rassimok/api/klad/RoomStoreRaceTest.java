@@ -1,5 +1,6 @@
 package dev.rassimok.api.klad;
 
+import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
@@ -9,6 +10,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.IntStream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
@@ -349,6 +351,79 @@ class RoomStoreRaceTest {
         assertThat(race.bob().messages, equalTo(List.of(
                 json("{'type':'pos','slot':0,'nick':'Alice','x':2.5,'y':7.0,'tick':360}"))));
         assertThat(race.alice().messages, empty());
+    }
+
+    @Test
+    void shouldListSlotsZeroToNineInJoinOrder_whenConnect_givenRoomOfTen() {
+        // given
+        List<LobbyPlayer> players = roomOfTen();
+        String id = startedRoom(players.toArray(LobbyPlayer[]::new));
+        players.subList(0, players.size() - 1).forEach(player -> connect(id, player));
+
+        // when
+        FakeSocket lastSocket = connect(id, players.getLast());
+
+        // then
+        JsonArray expectedPlayers = new JsonArray();
+        for (int slot = 0; slot < 10; slot++) {
+            expectedPlayers.add(new JsonObject().put("slot", slot).put("nick", players.get(slot).nick())
+                    .put("kind", Rules.KIND_HUMAN).put("you", 9 == slot).put("connected", true).put("finished", false));
+        }
+        assertThat(lastSocket.messages, equalTo(List.of(
+                json("{'type':'state','state':'starting','level':1,'shape':'landscape','positions':[]}")
+                        .put("players", expectedPlayers),
+                COUNTDOWN)));
+    }
+
+    // All ten send in the same instant, as clients that share one go time do.
+    @Test
+    void shouldRelayEachPositionToTheNineOthersOnly_whenReceive_givenRaceOfTen() {
+        // given
+        RaceOfTen race = racingRoomOfTen();
+
+        // when
+        for (int slot = 0; slot < race.players().size(); slot++) {
+            rooms.receive(race.id(), race.players().get(slot).id(), race.sockets().get(slot),
+                    new RaceMessage.Position(slot, 1, slot));
+        }
+
+        // then
+        for (int receiver = 0; receiver < race.players().size(); receiver++) {
+            int receiverSlot = receiver;
+            List<JsonObject> expected = IntStream.range(0, race.players().size())
+                    .filter(sender -> receiverSlot != sender)
+                    .mapToObj(sender -> json("{'type':'pos','y':1.0}").put("slot", sender)
+                            .put("nick", race.players().get(sender).nick()).put("x", (double) sender).put("tick", sender))
+                    .toList();
+            assertThat(race.sockets().get(receiver).messages, equalTo(expected));
+        }
+    }
+
+    @Test
+    void shouldPlaceAllTenInOrderReceived_whenReceive_givenLastOfTenFinishes() {
+        // given
+        RaceOfTen race = racingRoomOfTen();
+        for (int slot = 9; slot > 0; slot--) {
+            rooms.receive(race.id(), race.players().get(slot).id(), race.sockets().get(slot),
+                    new RaceMessage.Finish(1000 + slot));
+        }
+
+        // when
+        rooms.receive(race.id(), race.players().getFirst().id(), race.sockets().getFirst(), new RaceMessage.Finish(1000));
+
+        // then
+        JsonArray places = new JsonArray();
+        for (int place = 1; place <= 10; place++) {
+            int slot = 10 - place;
+            places.add(new JsonObject().put("slot", slot).put("nick", race.players().get(slot).nick())
+                    .put("kind", Rules.KIND_HUMAN).put("place", place).put("ticks", 1000 + slot).put("left", false));
+        }
+        JsonObject results = json("{'type':'results'}").put("places", places);
+        for (FakeSocket socket : race.sockets()) {
+            assertThat(socket.messages, equalTo(List.of(results)));
+            assertThat(socket.closeReason, equalTo(Room.RACE_OVER));
+        }
+        assertThat(rooms.find(race.id(), alice).state(), equalTo(LOBBY));
     }
 
     @Test
@@ -851,6 +926,27 @@ class RoomStoreRaceTest {
         return new Race(id, aliceSocket, bobSocket);
     }
 
+    // Alice, Bob and Carol join first, so they hold slots 0 to 2.
+    private List<LobbyPlayer> roomOfTen() {
+        List<LobbyPlayer> players = new ArrayList<>(List.of(alice, bob, carol));
+        for (int slot = 3; slot < 10; slot++) {
+            players.add(player("Racer" + slot));
+        }
+        return players;
+    }
+
+    // Every member connects, so go comes 3 s later; what was sent before go
+    // is cleared.
+    private RaceOfTen racingRoomOfTen() {
+        List<LobbyPlayer> players = roomOfTen();
+        String id = startedRoom(players.toArray(LobbyPlayer[]::new));
+        List<FakeSocket> sockets = players.stream().map(player -> connect(id, player)).toList();
+        clock.advance(Rules.RACE_COUNTDOWN);
+        rooms.advance();
+        sockets.forEach(socket -> socket.messages.clear());
+        return new RaceOfTen(id, players, sockets);
+    }
+
     private List<String> fillWithStartedRooms() {
         List<String> ids = new ArrayList<>();
         for (int i = 0; i < Rules.ROOMS_MAX; i++) {
@@ -908,5 +1004,9 @@ class RoomStoreRaceTest {
     }
 
     private record Race(String id, FakeSocket alice, FakeSocket bob) {
+    }
+
+    // The players and their sockets in slot order.
+    private record RaceOfTen(String id, List<LobbyPlayer> players, List<FakeSocket> sockets) {
     }
 }

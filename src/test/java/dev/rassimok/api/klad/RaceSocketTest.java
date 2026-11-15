@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -27,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.notNullValue;
@@ -76,7 +78,11 @@ class RaceSocketTest {
     void createPlayersOnce() {
         if (null == players) {
             List<Player> created = new ArrayList<>();
-            for (String prefix : List.of("Host", "Guest", "Third", "Outside")) {
+            List<String> prefixes = new ArrayList<>(List.of("Host", "Guest", "Third", "Outside"));
+            for (int slot = 3; slot < 10; slot++) {
+                prefixes.add("Racer" + slot);
+            }
+            for (String prefix : prefixes) {
                 String nick = TestPlayers.uniqueNick(prefix);
                 created.add(new Player(nick, TestPlayers.createGuest(nick, Rules.KIND_HUMAN)));
             }
@@ -168,6 +174,83 @@ class RaceSocketTest {
             assertThat(racer.nextOfType("results"), equalTo(results));
             assertThat(racer.closing(), equalTo(RACE_OVER));
         }
+    }
+
+    // Each member reads its state before the next one connects, so who is
+    // connected in it is certain. Every position goes out in the same
+    // instant, as from clients that share one go time; a pong right after
+    // the nine relays proves nothing was echoed.
+    @Test
+    void shouldRunWholeRace_whenSendText_givenTenMembers() throws Exception {
+        // given
+        List<Player> members = tenMembers();
+        String id = RaceRooms.startedRoom(members.stream().map(Player::token).toList());
+        List<RaceClient> racers = new ArrayList<>();
+        List<JsonObject> states = new ArrayList<>();
+        for (Player member : members) {
+            RaceClient racer = connect(member, id);
+            racers.add(racer);
+            states.add(racer.next());
+        }
+        List<JsonObject> goes = new ArrayList<>();
+        for (RaceClient racer : racers) {
+            assertThat(racer.next(), equalTo(COUNTDOWN));
+            goes.add(racer.next());
+        }
+
+        // when
+        for (int slot = 0; slot < racers.size(); slot++) {
+            racers.get(slot).send("{\"type\":\"pos\",\"x\":" + slot + ",\"y\":1,\"tick\":" + slot + "}");
+        }
+        List<List<JsonObject>> seen = new ArrayList<>();
+        for (RaceClient racer : racers) {
+            List<JsonObject> positions = new ArrayList<>();
+            for (int i = 0; i < 9; i++) {
+                positions.add(racer.next());
+            }
+            seen.add(positions);
+            racer.send(PING);
+        }
+        List<JsonObject> pongs = new ArrayList<>();
+        for (RaceClient racer : racers) {
+            pongs.add(racer.next());
+        }
+        for (int slot = 9; slot > 0; slot--) {
+            finishInTurn(racers.get(slot), 1000 + slot);
+        }
+        racers.getFirst().send("{\"type\":\"finish\",\"ticks\":1000}");
+
+        // then
+        for (int connected = 0; connected < 10; connected++) {
+            JsonArray players = new JsonArray();
+            for (int slot = 0; slot < 10; slot++) {
+                players.add(player(slot, members.get(slot), connected == slot, slot <= connected));
+            }
+            assertThat(states.get(connected), equalTo(state("starting", players, new JsonArray())));
+        }
+        assertThat(goes.getFirst().getString("type"), equalTo("go"));
+        assertThat(goes, everyItem(equalTo(goes.getFirst())));
+        for (int receiver = 0; receiver < 10; receiver++) {
+            List<JsonObject> expected = new ArrayList<>();
+            for (int sender = 0; sender < 10; sender++) {
+                if (receiver != sender) {
+                    expected.add(position(sender, members.get(sender), sender, 1, sender));
+                }
+            }
+            assertThat(seen.get(receiver), containsInAnyOrder(expected.toArray(new JsonObject[0])));
+        }
+        assertThat(pongs, everyItem(equalTo(PONG)));
+        JsonArray places = new JsonArray();
+        for (int place = 1; place <= 10; place++) {
+            int slot = 10 - place;
+            places.add(place(slot, members.get(slot), place, 1000 + slot));
+        }
+        for (RaceClient racer : racers) {
+            assertThat(racer.nextOfType("results"), equalTo(results(places)));
+            assertThat(racer.closing(), equalTo(RACE_OVER));
+        }
+        assertThat(RaceRooms.state(host().token(), id), equalTo("lobby"));
+        assertThat(readyMarks(id), equalTo(Collections.nCopies(10, false)));
     }
 
     @Test
@@ -399,6 +482,13 @@ class RaceSocketTest {
 
     private static Player outsider() {
         return players.get(3);
+    }
+
+    // Host, guest and third, then the seven made after the outsider.
+    private static List<Player> tenMembers() {
+        List<Player> members = new ArrayList<>(List.of(host(), guest(), third()));
+        members.addAll(players.subList(4, 11));
+        return members;
     }
 
     private RaceClient connect(Player player, String roomId) throws Exception {

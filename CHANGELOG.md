@@ -3,7 +3,135 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
-## 2026-11-15 - Production logs are JSON, with a severity and the stack trace in one field
+## 2026-11-15 (later still) - Rooms of up to 10 players
+
+The user wants up to 10 players in one room (RAS-43, contract sections 7
+and 8). The game was made ready first (site, RAS-42: 10 ghost slots, 10
+colours), or a fifth runner would have been invisible to the others.
+
+- `Rules.ROOM_SIZE` goes from 4 to 10. The tenth player joins with 200; the
+  eleventh gets 409 `room_full`. The room answer and every list entry say
+  `"size":10`.
+- Race slots run 0 to 9. They already followed the join order in
+  `Room.start`, so no race logic changed.
+- `Rules.SOCKETS_OPEN_MAX` stays 20 (below). Its comment now says 2 full
+  races of 10 at once instead of 5 full races.
+- Contract sections 7 and 8 (workspace) say up to 10 players, `"size":10`
+  and `slot` 0 to 9, the 503 for a third full race, and the lobby request
+  cost of a full room.
+
+### Load, by the ticket's numbers
+
+- **Sockets.** The 20 sockets held 5 full races of 4. They hold 2 full
+  races of 10, or more smaller ones. The players of a third full race get
+  503 on the handshake, and the game says online play is not available.
+- **Relayed positions.** Every position goes to every other member. A full
+  room of 4 relays 4 x 5 x 3 = 60 messages a second. A full room of 10
+  relays 10 x 5 x 9 = 450, or 900 if every member sends at the server's
+  limit of 10 a second. Each socket receives 45 a second (90 at the limit)
+  instead of 15.
+- **Slow readers.** A socket with 8 unfinished sends is closed with 1008
+  `not_reading` (`SocketSender`), and the game does not reconnect after
+  1008. A send counts as unfinished until Netty has written it to the
+  socket. By the Vert.x 4.5.33 code (read, not traced at runtime), a send
+  queued to the socket's event loop is written and flushed at once, outside
+  any read, and its completion runs inline on that loop while the kernel
+  takes the bytes, so 9 relays queued back to back do not pile up for a
+  client that reads. Measured below: no socket closed at about 82 messages
+  a second each (all members sending at 10 a second in the same instant,
+  less what the limit dropped). A phone on a slow link was not measured;
+  it now gets three times the traffic.
+- **Memory.** Only a race of 4 had been measured (109.3 of 256 MiB, 2026-11-13
+  ninth); the 20-socket flood peaked at 228.7. The race rows below peak at
+  about 147 MiB, one race or two.
+- **Requests.** Each member polls the room every 10 s through the Pages
+  Function. A full room of 10 in the lobby costs about 6,000 requests an
+  hour (2,400 for 4) of the shared 100,000 a day, and each one reads the
+  session from Neon.
+- **Abuse.** One member who floods `pos` at the limit now reaches 9 others,
+  not 3 (the limit drops the rest silently, as before). Guests are free to
+  create (`POST /players` has no limit), so filling a room of 10 with fresh
+  guests is as cheap as filling one of 4. Taking every place on the room
+  list (RAS-45) with full rooms now needs 200 polling guests in 20 rooms of
+  10 instead of 80 in rooms of 4; rooms that are not full still offer a
+  join. The 100-room cap fill is unchanged (about 100 guests for about 11
+  minutes).
+
+### Tests
+
+- Unit, fake clock: `RoomStoreTest` fills its full room with 10 players, so
+  Eve is the eleventh. The join of a member already in it compares all 10
+  entries whole and pins the size 10. The join race is now 20 players at
+  once against 9 free places (`shouldTakeExactlyNineMore_whenJoin_givenTwentyPlayersAtOnce`,
+  was 8 against 3). `RoomStoreRaceTest` (+3), a race of 10: the last member's
+  `state` lists slots 0 to 9 in join order, whole, then the countdown; all
+  ten send a `pos` in the same instant and each socket gets exactly the 9
+  others, in order, never its own; finishes from slot 9 down give 10 places
+  in receipt order, every socket gets the same results and 1000
+  `race_over`, and the room is back in `lobby`.
+- `@QuarkusTest`: `RoomResourceTest` replaces the fifth-player test with
+  the tenth join (200, `size` 10, 10 players) and the eleventh (409
+  `room_full`), and the six joins at once with twelve (nine 200, three
+  409). `RaceSocketTest` (+1) runs a whole race of 10 real sockets: each
+  `state` whole as the members connect one by one, one `countdown` and one
+  `go` time for all, ten `pos` sent at once, each socket getting exactly the
+  9 others, then a `pong` that proves no echo; 10 places in receipt order,
+  10 times 1000 `race_over`, the room in `lobby` with no ready marks. The
+  three-member race stays.
+- `SocketGuardsTest` is unchanged in code: `RaceRoute` fills the cap in
+  rooms of `ROOM_SIZE`, so every abuse test now ends by opening the whole
+  cap as two rooms of 10, each connected within its 15 s wait.
+- Native: `RoomResourceIT`, `RaceSocketIT` and `SocketGuardsIT` run the
+  same against the binary.
+
+### Decisions worth not relitigating
+
+- **The socket cap stays 20** (user, 2026-11-15, the ticket's option a): no
+  deploy change, 2 full races of 10 at once. Raising it, to 40 for example,
+  would need `--memory 512Mi` in `deploy.yml` (CODEOWNERS-protected) and a
+  higher bill per active second, because the 20-socket flood already used
+  228.7 of 256 MiB. Sockets would also take half of the 80 request slots
+  that REST needs. There is one real player today, and RAS-37 item 1 (the
+  session-lookup flood that killed a 256 MiB instance) is still open. Raise
+  it later, with a measurement.
+- **Assumed, not asked:** every room has the size 10 (the host does not
+  choose one), and Start still needs at least 2 players, all ready.
+- **Measured on the native binary** of this branch, built after its last
+  change to `src/main` (the same binary the native tests then ran
+  against), set up as for the RAS-32 table: `--memory 256m --memory-swap 256m --cpus 1`, a throwaway
+  `postgres:18`, a raw-socket client in a second container that sets up
+  the rooms over REST, each row on a fresh server container. `memory.peak`,
+  and `anon` sampled every second, come from the container's cgroup; sizes
+  in MiB. Each row runs 120 s of positions; every member sends one `pos` in
+  the same instant as all the others, with a `ping` every 20 s as the game
+  does. Then the members finish from slot 9 down. Idle: 95.2 to 99.9 peak,
+  20.2 to 24.4 `anon`.
+
+  | Row | Peak | `anon` max | What happened |
+  |---|---|---|---|
+  | one race of 10, sent at 5 a second | 146.6 | 64.6 | 6,000 of 6,000 positions relayed to all 9 others (54,000 frames), none echoed; 60 of 60 pongs; `/status` 122 of 122 times 200, at most 10.3 ms; no socket ended early; 10 places in receipt order; 10 times 1000 `race_over`; the room back in `lobby`, nobody ready; 6.0 s of CPU |
+  | one race of 10, sent at 10 a second | 143.8 | 64.7 | 10,981 of 12,000 relayed to all 9 others (98,829 frames, about 82 a second per socket), 1,019 dropped by the 10-a-second limit, none relayed to only some, none echoed; 60 of 60 pongs; `/status` 122 of 122, at most 8.6 ms; no socket ended early; results and closes as above; 8.2 s of CPU |
+  | two races of 10 at once (20 sockets, the whole cap), sent at 5 a second | 144.9 | 65.1 | 12,000 of 12,000 relayed to all 9 others (108,000 frames), none echoed; 120 of 120 pongs; `/status` 122 of 122, at most 7.9 ms; no socket ended early; 20 times 10 places; 20 times 1000 `race_over`; 7.8 s of CPU |
+  | two races of 10 at once, sent at 10 a second | 144.2 | 64.6 | 21,942 of 24,000 relayed to all 9 others (197,478 frames, about 82 a second per socket), 2,058 dropped by the limit, none relayed to only some, none echoed; 120 of 120 pongs; `/status` 122 of 122, at most 8.7 ms; no socket ended early; results and closes as above; 10.9 s of CPU |
+
+  - "Relayed" means a position reached all 9 other members of its room. A
+    position the limit dropped reaches none. A position that reached some
+    but not all would be a relay fault: there were none. At a nominal 10 a
+    second, about 8.5 % fall to the limit. It is a sliding window on the
+    server's receipt time, so timing jitter puts an 11th position inside a
+    second now and then (contract section 8: dropped silently). The game
+    sends about 5 a second.
+  - `anon` levels off at about 62 MiB within 30 s and stays flat to the
+    end, whether one race runs or two. The peaks include the binary's
+    mapped file pages (about 71 MiB idle).
+  - Nothing was logged at WARN or above, apart from the known line about
+    `quarkus.log.console.json`. No socket was closed with `not_reading`.
+  - Before measuring, a row counted as not fitting on any of these: an OOM
+    kill or restart, a peak above 80 % of the limit (204.8 MiB), any
+    `not_reading` or other early close, any position relayed to only some
+    members or echoed, or a `/status` that was not 200 or took over 1 s.
+
+## 2026-11-15 (later) - Production logs are JSON, with a severity and the stack trace in one field
 
 Cloud Run sends the console to Cloud Logging, and until now every line
 arrived as plain text (RAS-51). The key `%prod.quarkus.log.console.json=true`

@@ -36,6 +36,9 @@ class RoomStoreTest {
     private final LobbyPlayer carol = player("Carol");
     private final LobbyPlayer dave = player("Dave");
     private final LobbyPlayer eve = player("Eve");
+    // Alice first, then Bob, Carol, Dave and more up to the room size; Eve stays outside.
+    private final List<LobbyPlayer> fullRoomPlayers = Stream.concat(Stream.of(alice, bob, carol, dave),
+            IntStream.range(4, Rules.ROOM_SIZE).mapToObj(i -> player("Member" + i))).toList();
     private final FakeClock clock = new FakeClock(START);
     private final RoomStore rooms = new RoomStore(clock);
 
@@ -313,8 +316,11 @@ class RoomStoreTest {
         RoomView room = rooms.join(id, dave);
 
         // then
-        assertThat(room, equalTo(roomSeenBy(dave, id, LOBBY, alice, member(alice, false, true), member(bob, false, false),
-                member(carol, false, false), member(dave, false, false))));
+        RoomView.RoomPlayer[] members = fullRoomPlayers.stream()
+                .map(player -> member(player, false, alice.equals(player)))
+                .toArray(RoomView.RoomPlayer[]::new);
+        assertThat(room, equalTo(roomSeenBy(dave, id, LOBBY, alice, members)));
+        assertThat(room.players().size(), equalTo(10));
     }
 
     @Test
@@ -397,10 +403,10 @@ class RoomStoreTest {
     }
 
     @Test
-    void shouldTakeExactlyThreeMore_whenJoin_givenEightPlayersAtOnce() throws Exception {
+    void shouldTakeExactlyNineMore_whenJoin_givenTwentyPlayersAtOnce() throws Exception {
         // given
         String id = rooms.create(alice);
-        List<Callable<Boolean>> joins = IntStream.range(0, 8)
+        List<Callable<Boolean>> joins = IntStream.range(0, 20)
                 .<Callable<Boolean>>mapToObj(i -> () -> isAccepted(() -> rooms.join(id, player("Joiner" + i))))
                 .toList();
 
@@ -1178,9 +1184,7 @@ class RoomStoreTest {
 
     private String fullRoom() {
         String id = rooms.create(alice);
-        rooms.join(id, bob);
-        rooms.join(id, carol);
-        rooms.join(id, dave);
+        fullRoomPlayers.stream().skip(1).forEach(player -> rooms.join(id, player));
         return id;
     }
 
