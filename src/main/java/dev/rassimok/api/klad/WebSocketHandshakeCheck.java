@@ -1,6 +1,7 @@
 package dev.rassimok.api.klad;
 
 import io.vertx.core.AsyncResult;
+import io.vertx.core.Context;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.Cookie;
@@ -94,10 +95,13 @@ public class WebSocketHandshakeCheck {
         } else {
             Cookie cookie = request.getCookie(Sessions.COOKIE);
             String token = null == cookie ? null : cookie.getValue();
-            // The session lookup blocks, so it runs on a worker thread. Its result
-            // comes back on the request's event loop, where the upgrade happens.
-            Vertx.currentContext().executeBlocking(() -> signedInPlayer.apply(token), false)
-                    .onComplete(lookup -> afterLookup(context, connection, lookup, endpoint));
+            // The session lookup blocks, so it runs on a worker thread. Its result is
+            // handled in a later event-loop task: an upgrade inside this read would feed
+            // the bytes behind the request to the WebSocket decoder and lose the 101.
+            Context requestContext = Vertx.currentContext();
+            requestContext.executeBlocking(() -> signedInPlayer.apply(token), false)
+                    .onComplete(lookup -> requestContext.runOnContext(
+                            ignored -> afterLookup(context, connection, lookup, endpoint)));
         }
     }
 

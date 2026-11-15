@@ -3,6 +3,70 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-15 (fifth) - A socket upgrade never runs inside the read of its handshake
+
+`SocketGuardsTest.shouldOpenSocketsUpToCap_whenConnect_givenTwoHandshakesInOneWrite`
+failed twice on main's CI on 2026-11-15 (RAS-72): the JVM test of the
+RAS-51 merge and the native `SocketGuardsIT` of the RAS-53 merge. One of
+the 40 connections read end of stream where it expected
+`HTTP/1.1 101 Switching Protocols`; reruns passed. The cause was the
+server, not the test.
+
+- **Cause.** `WebSocketHandshakeCheck` runs the session lookup on a worker
+  thread and attaches `onComplete` to the returned future. If the lookup
+  ended before `onComplete` was attached (the event-loop thread descheduled
+  for a millisecond or two right after submitting the task, likelier on a
+  busy 4-vCPU runner), Vert.x ran the callback at once, inside the read
+  that carried the handshake, and the upgrade happened while that read was
+  still being decoded. Netty's handshaker swaps the HTTP decoder for the
+  WebSocket decoder before it writes the 101, and the HTTP decoder hands
+  the bytes it has not decoded yet, here the second handshake of the same
+  write, to the WebSocket decoder. `GET` is no WebSocket frame (RSV bits
+  set), the decoder throws, Vert.x closes the connection, and the 101 is
+  written to a closed channel. Vert.x's default HTTP server exception
+  handler logs this at TRACE only, so CI showed nothing. On the usual path
+  the callback runs in a later event-loop task, after the read has decoded
+  the second request and queued it behind the first, which is the case the
+  test was written for.
+- **Fix.** The lookup's result goes through `runOnContext`, so `afterLookup`
+  always runs in an event-loop task of its own and the upgrade never runs
+  inside the read of its handshake. It costs one extra task per handshake.
+  The test is unchanged: with the fix the first handshake gets its 101
+  whatever the lookup's timing, and the 500 ms hold still gives a second
+  handshake that got past the guard the time to do harm.
+- **Reach.** Only a client that sends bytes behind its handshake before
+  the 101 could meet this; browsers wait for the 101, and the site's proxy
+  opens one connection per upgrade. No slot was lost: the connection's
+  close gave it back (both CI failures opened all 20 sockets afterwards).
+- **Proof.** By mutation, local only: a 50 ms pause on the event loop
+  between submitting the lookup and attaching `onComplete` made the test
+  fail on all 40 connections with the CI's message, and TRACE logging
+  showed `CorruptedWebSocketFrameException: RSV != 0 and no extension
+  negotiated` thrown from `WebSocketServerHandshaker` through
+  `DefaultChannelPipeline.replace` and `ByteToMessageDecoder.handlerRemoved`.
+  With the fix and a 10 ms pause on every handshake, `SocketGuardsTest`,
+  `RaceSocketTest`, `AbandonedHandshakeLogTest` and
+  `ThrowingListenerLogTest` passed. Without a pause the flake never showed
+  locally (24 runs of `SocketGuardsTest` and 8 full JVM suites in Linux
+  containers capped at 2 CPUs with busy loops beside them, and about 4,200
+  handshake pairs from a temporary harness, up to 6 threads at once), which
+  fits a race inside one call.
+
+### Decisions worth not relitigating
+
+- **The server, not the test.** A test that read the status again, or
+  retried, would have hidden a server that closes a valid handshake
+  without an answer.
+- **No deterministic regression test.** The race is between the worker
+  thread and the event-loop thread inside one method call, which no
+  black-box test can force; a test-only pause in production code was not
+  wanted. The mutation check above stands in for it.
+- **Not handled:** a second handshake split across two TCP reads, with the
+  upgrade running between them, still reaches the WebSocket decoder and
+  closes the connection without a 101. It is not reachable through the
+  site's proxy, and loopback delivers the test's single write of about
+  530 bytes in one read.
+
 ## 2026-11-15 (fourth) - Room chat: members write in the room, read it in the room poll, memory only
 
 The user wants players to write to each other in the lobby before a game
