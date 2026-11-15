@@ -44,7 +44,8 @@ privacy page (RAS-57) can say that guests are deleted automatically about
   carrying request for about 20 s at the very worst.
 - A failed purge logs `Guest purge failed: <exception class>` at ERROR and
   leaves the request's answer as it would be. A run logs `Guest purge
-  deleted <n> guests and <m> expired sessions` at INFO, once a day. Neither
+  deleted <n> guests and <m> expired sessions` at INFO after each start
+  and then once a day. Neither
   line holds a nick or an id.
 - No migration: `session`, `level_clear` and `game_run` already reference
   `player` with `on delete cascade` (V1, V2). No new dependency and no
@@ -174,13 +175,16 @@ privacy page (RAS-57) can say that guests are deleted automatically about
   hold them back past "about 90 days"; `order by player.last_seen_at`
   before the `limit` drains the backlog first in, first out by last visit,
   for one sort of the candidates. It still runs once a day: draining a
-  backlog faster would go against the ticket's "at most once a day". With
-  the order the guest delete reads and sorts every candidate, so its time
-  grows with the backlog, not the batch: on a local Postgres 18 with
-  200,000 expired guests and 20,000 live ones it took 348 ms for its
-  1,000 rows, far below the 10 s statement timeout, so even a large
-  backlog drains (Neon's small compute is slower; not measured there). A
-  run that does time out logs its class and retries a day later.
+  backlog faster would go against the ticket's "at most once a day". The
+  guest delete reads every guest, live ones included, so its time grows
+  with the number of guests, not with the batch: on a local Postgres 18
+  with 200,000 expired guests and 20,000 live ones it took 348 ms for its
+  1,000 rows, while in a container held to a quarter vCPU about 1.1
+  million guests reached the 10 s statement timeout (Neon's small compute
+  not measured). Past that size every run is cancelled, logs its class and
+  deletes nothing, until `POST /players` gets a creation limit (a
+  follow-up) or the purge is run by hand; a longer timeout or a partial
+  index on `player (last_seen_at)` for guests are the options then.
   The session delete takes only accounts' sessions: a guest's go with it,
   and a guest left over by the batch keeps its expired session, so the
   next run still finds it as a guest whose sessions have expired rather
