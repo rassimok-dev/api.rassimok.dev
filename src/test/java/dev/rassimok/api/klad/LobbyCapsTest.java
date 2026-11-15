@@ -18,8 +18,8 @@ import static org.hamcrest.Matchers.equalTo;
 /**
  * JVM only: it fills the stores through the beans, which a native test
  * cannot reach. Its own profile starts a fresh application, so the full
- * stores never reach the other test classes. The two room tests fill the
- * room store with the same hosts.
+ * stores never reach the other test classes. The room tests fill the room
+ * store with the same hosts.
  */
 @QuarkusTest
 @TestProfile(LobbyCapsTest.FreshStores.class)
@@ -45,6 +45,20 @@ class LobbyCapsTest {
 
         // then
         response.statusCode(429).body("", equalTo(Map.of("error", ApiException.RATE_LIMITED)));
+    }
+
+    @Test
+    void shouldAnswerInvalidListed_whenCreateRoom_givenRoomCapReachedAndNeitherTrueNorFalse() {
+        // given
+        String token = TestPlayers.createGuest("CapLister", Rules.KIND_HUMAN);
+        fillRooms();
+
+        // when
+        ValidatableResponse response = given().cookie(TestPlayers.COOKIE, token).queryParam("listed", "yes")
+                .when().post("/rooms").then();
+
+        // then
+        response.statusCode(400).body("", equalTo(Map.of("error", ApiException.INVALID_LISTED)));
     }
 
     @Test

@@ -10,6 +10,7 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.resteasy.reactive.RestResponse;
@@ -25,6 +26,8 @@ public class RoomResource {
     private static final String FIELD_ID = "id";
     private static final String FIELD_READY = "ready";
     private static final String FIELD_LISTED = "listed";
+    private static final String LISTED_TRUE = "true";
+    private static final String LISTED_FALSE = "false";
 
     @Inject
     Sessions sessions;
@@ -32,11 +35,18 @@ public class RoomResource {
     @Inject
     RoomStore rooms;
 
+    // A query parameter, as this endpoint ignores any body. Only the exact
+    // words count, so a typo is refused instead of making the room link only.
     @POST
     @Transactional
-    public RestResponse<Map<String, String>> create(@CookieParam(Sessions.COOKIE) String token) {
+    public RestResponse<Map<String, String>> create(@QueryParam(FIELD_LISTED) String listed,
+                                                    @CookieParam(Sessions.COOKIE) String token) {
         Sessions.SignedIn signedIn = sessions.require(token);
-        String id = rooms.create(LobbyPlayer.of(signedIn.player()));
+        boolean isListed = null == listed || LISTED_TRUE.equals(listed);
+        if (!isListed && !LISTED_FALSE.equals(listed)) {
+            throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_LISTED);
+        }
+        String id = rooms.create(LobbyPlayer.of(signedIn.player()), isListed);
         return Sessions.withRefreshedCookie(
                 RestResponse.ResponseBuilder.create(RestResponse.Status.CREATED, Map.of(FIELD_ID, id)), signedIn);
     }

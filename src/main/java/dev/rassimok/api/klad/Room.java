@@ -199,12 +199,15 @@ final class Room {
         }
     }
 
+    // A player outside the room sees it as empty: the list hands out the ids,
+    // and it must not show who plays with whom.
     RoomView view(UUID viewerId) {
-        List<RoomView.RoomPlayer> players = members.stream()
+        List<Member> shownMembers = null == member(viewerId) ? List.of() : members;
+        List<RoomView.RoomPlayer> players = shownMembers.stream()
                 .map(member -> new RoomView.RoomPlayer(member.nick, member.kind, member.isReady,
                         member.playerId.equals(hostId), member.playerId.equals(viewerId)))
                 .toList();
-        RoomView.Host host = members.isEmpty() ? null : new RoomView.Host(members.getFirst().nick);
+        RoomView.Host host = shownMembers.isEmpty() ? null : new RoomView.Host(shownMembers.getFirst().nick);
         return new RoomView(id, stateName(), host, players, level, shape, Rules.ROOM_SIZE, isListed);
     }
 

@@ -39,9 +39,13 @@ public class RoomStore {
         this.clock = clock;
     }
 
+    synchronized String create(LobbyPlayer player) {
+        return create(player, true);
+    }
+
     // Closing the player's old room first frees its place under the cap, so
     // a host can always replace their room, also one that is racing.
-    synchronized String create(LobbyPlayer player) {
+    synchronized String create(LobbyPlayer player, boolean isListed) {
         Instant now = clock.instant();
         removeExpired(now);
         List<Room> hostedRooms = rooms.values().stream().filter(room -> room.isHostOrLastHost(player.id())).toList();
@@ -54,6 +58,7 @@ public class RoomStore {
         }
         leaveCurrentRoom(player.id(), now);
         Room room = new Room(newId(), now);
+        room.isListed = isListed;
         room.add(player, now);
         rooms.put(room.id, room);
         return room.id;

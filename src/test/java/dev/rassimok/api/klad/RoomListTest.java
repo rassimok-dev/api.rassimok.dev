@@ -67,6 +67,22 @@ class RoomListTest {
     }
 
     @Test
+    void shouldLeaveOutRoom_whenListRooms_givenRoomCreatedLinkOnly() {
+        // given
+        String host = TestPlayers.createGuest("MadeLinkHost", Rules.KIND_HUMAN);
+        String other = TestPlayers.createGuest("MadeLinkGuest", Rules.KIND_HUMAN);
+        String id = given().cookie(TestPlayers.COOKIE, host).queryParam("listed", "false")
+                .when().post("/rooms")
+                .then().statusCode(201).extract().path("id");
+
+        // when
+        ValidatableResponse response = listRooms(other);
+
+        // then
+        response.statusCode(200).body("rooms.id", not(hasItem(id)));
+    }
+
+    @Test
     void shouldLeaveOutRoom_whenListRooms_givenEmptyRoom() {
         // given
         String host = TestPlayers.createGuest("EmptyHost", Rules.KIND_HUMAN);

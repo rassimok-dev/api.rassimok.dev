@@ -228,6 +228,44 @@ class RoomStoreTest {
     }
 
     @Test
+    void shouldShowNoMembers_whenFind_givenPlayerNotInFullRoom() {
+        // given
+        String id = fullRoom();
+
+        // when
+        RoomView room = rooms.find(id, eve);
+
+        // then
+        assertThat(room, equalTo(seenFromOutside(id, LOBBY)));
+    }
+
+    @Test
+    void shouldShowNoMembers_whenFind_givenPlayerNotInStartingRoom() {
+        // given
+        String id = startedRoom();
+
+        // when
+        RoomView room = rooms.find(id, carol);
+
+        // then
+        assertThat(room, equalTo(seenFromOutside(id, STARTING)));
+    }
+
+    @Test
+    void shouldShowNoMembers_whenFind_givenPlayerWithLinkToLinkOnlyRoom() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.setListed(id, alice, false);
+
+        // when
+        RoomView room = rooms.find(id, carol);
+
+        // then
+        assertThat(room, equalTo(linkOnly(seenFromOutside(id, LOBBY))));
+    }
+
+    @Test
     void shouldShowNewNick_whenFind_givenMemberRenamed() {
         // given
         String id = rooms.create(alice);
@@ -421,7 +459,7 @@ class RoomStoreTest {
         rooms.leave(id, alice);
 
         // when
-        RoomView room = rooms.find(id, bob);
+        RoomView room = rooms.find(id, alice);
 
         // then
         assertThat(room, equalTo(new RoomView(id, LOBBY, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE,
@@ -746,10 +784,11 @@ class RoomStoreTest {
         clock.advance(Duration.ofSeconds(30).plusMillis(1));
 
         // when
-        RoomView room = rooms.find(id, bob);
+        RoomView seenByBob = rooms.find(id, bob);
 
         // then
-        assertThat(room, equalTo(roomSeenBy(bob, id, LOBBY, alice, member(alice, false, true))));
+        assertThat(seenByBob, equalTo(seenFromOutside(id, LOBBY)));
+        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, false, true))));
     }
 
     @Test
@@ -797,10 +836,10 @@ class RoomStoreTest {
         clock.advance(Rules.RACE_CONNECT_WAIT.minusSeconds(1));
 
         // when
-        RoomView room = rooms.find(id, carol);
+        RoomView room = rooms.find(id, alice);
 
         // then
-        assertThat(room, equalTo(roomSeenBy(carol, id, STARTING, alice, member(alice, true, true), member(bob, true, false))));
+        assertThat(room, equalTo(room(id, STARTING, alice, member(alice, true, true), member(bob, true, false))));
     }
 
     @Test
@@ -1102,6 +1141,41 @@ class RoomStoreTest {
         assertThat(rooms.find(id, bob), equalTo(linkOnly(room(id, LOBBY, bob, member(bob, false, true)))));
     }
 
+    @Test
+    void shouldMakeLinkOnlyRoom_whenCreate_givenNotListed() {
+        // when
+        String id = rooms.create(alice, false);
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(linkOnly(room(id, LOBBY, alice, member(alice, false, true)))));
+        assertThat(rooms.list(), equalTo(roomList()));
+    }
+
+    @Test
+    void shouldLeaveOutRoom_whenList_givenRoomCreatedLinkOnlyAndJoined() {
+        // given
+        String id = rooms.create(alice, false);
+        rooms.join(id, bob);
+
+        // when
+        RoomListView list = rooms.list();
+
+        // then
+        assertThat(list, equalTo(roomList()));
+    }
+
+    @Test
+    void shouldListRoom_whenSetListed_givenRoomCreatedLinkOnly() {
+        // given
+        String id = rooms.create(alice, false);
+
+        // when
+        rooms.setListed(id, alice, true);
+
+        // then
+        assertThat(rooms.list(), equalTo(roomList(listed(id, LOBBY, alice, 1))));
+    }
+
     private String fullRoom() {
         String id = rooms.create(alice);
         rooms.join(id, bob);
@@ -1177,6 +1251,10 @@ class RoomStoreTest {
                 .toList();
         return new RoomView(id, state, new RoomView.Host(host.nick()), seenPlayers, Rules.LEVEL_MIN,
                 Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true);
+    }
+
+    private static RoomView seenFromOutside(String id, String state) {
+        return new RoomView(id, state, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true);
     }
 
     private static RoomView linkOnly(RoomView room) {

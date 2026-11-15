@@ -532,11 +532,11 @@ class RoomStoreRaceTest {
         clock.advance(Rules.LOBBY_MEMBER_SILENCE);
 
         // when
-        RoomView room = rooms.find(race.id(), carol);
+        RoomView room = rooms.find(race.id(), alice);
 
         // then
         assertThat(room, equalTo(new RoomView(race.id(), LOBBY, new RoomView.Host("Alice"),
-                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, false, true, false),
+                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, false, true, true),
                         new RoomView.RoomPlayer("Bob", Rules.KIND_HUMAN, false, false, false)),
                 Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true)));
     }
@@ -550,10 +550,25 @@ class RoomStoreRaceTest {
         clock.advance(Rules.LOBBY_MEMBER_SILENCE.plus(MILLISECOND));
 
         // when
+        RoomView seenByAlice = rooms.find(race.id(), alice);
+        RoomView seenByBob = rooms.find(race.id(), bob);
+
+        // then
+        assertThat(seenByAlice, equalTo(emptyLobby(race.id())));
+        assertThat(seenByBob, equalTo(emptyLobby(race.id())));
+    }
+
+    @Test
+    void shouldShowNoMembers_whenFind_givenPlayerNotInRacingRoom() {
+        // given
+        Race race = racingRoom();
+
+        // when
         RoomView room = rooms.find(race.id(), carol);
 
         // then
-        assertThat(room, equalTo(emptyLobby(race.id())));
+        assertThat(room, equalTo(new RoomView(race.id(), RACING, null, List.of(), Rules.LEVEL_MIN,
+                Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true)));
     }
 
     @Test
@@ -684,7 +699,8 @@ class RoomStoreRaceTest {
         rooms.leave(id, bob);
 
         // then
-        assertThat(rooms.find(id, carol), equalTo(emptyLobby(id)));
+        assertThat(rooms.find(id, alice), equalTo(emptyLobby(id)));
+        assertThat(rooms.find(id, bob), equalTo(emptyLobby(id)));
         assertThat(rooms.raceRefusal(id, bob.id()), equalTo(409));
     }
 
@@ -790,7 +806,8 @@ class RoomStoreRaceTest {
                 {'type':'results','places':[
                 {'slot':0,'nick':'Alice','kind':'human','place':1,'ticks':1200,'left':false},
                 {'slot':1,'nick':'Bob','kind':'human','place':null,'ticks':null,'left':false}]}""")));
-        assertThat(rooms.find(id, carol), equalTo(emptyLobby(id)));
+        assertThat(rooms.find(id, alice), equalTo(emptyLobby(id)));
+        assertThat(rooms.find(id, bob), equalTo(emptyLobby(id)));
     }
 
     @Test
