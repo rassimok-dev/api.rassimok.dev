@@ -95,9 +95,9 @@ public class WebSocketHandshakeCheck {
         } else {
             Cookie cookie = request.getCookie(Sessions.COOKIE);
             String token = null == cookie ? null : cookie.getValue();
-            // The session lookup blocks, so it runs on a worker thread. Its result is
-            // handled in a later event-loop task: an upgrade inside this read would feed
-            // the bytes behind the request to the WebSocket decoder and lose the 101.
+            // The lookup blocks and runs on a worker thread. The upgrade waits
+            // for a later event-loop task: inside this read it would pass the
+            // bytes after the request to the WebSocket decoder, losing the 101.
             Context requestContext = Vertx.currentContext();
             requestContext.executeBlocking(() -> signedInPlayer.apply(token), false)
                     .onComplete(lookup -> requestContext.runOnContext(

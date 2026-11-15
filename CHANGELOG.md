@@ -38,6 +38,10 @@ server, not the test.
   the 101 could meet this; browsers wait for the 101, and the site's proxy
   opens one connection per upgrade. No slot was lost: the connection's
   close gave it back (both CI failures opened all 20 sockets afterwards).
+  The native failure also carried a suppressed `IllegalStateException:
+  WebSocket is closed` from the test's teardown: one of the 20 cap sockets
+  had been closed from the server side before the teardown. This fix does
+  not explain that; it is a follow-up on the race socket.
 - **Proof.** By mutation, local only: a 50 ms pause on the event loop
   between submitting the lookup and attaching `onComplete` made the test
   fail on all 40 connections with the CI's message, and TRACE logging
@@ -65,7 +69,8 @@ server, not the test.
   upgrade running between them, still reaches the WebSocket decoder and
   closes the connection without a 101. It is not reachable through the
   site's proxy, and loopback delivers the test's single write of about
-  530 bytes in one read.
+  530 bytes in one read. A raw client at the run.app URL can reach it, and
+  it only closes its own connection; the slot comes back at the close.
 
 ## 2026-11-15 (fourth) - Room chat: members write in the room, read it in the room poll, memory only
 
