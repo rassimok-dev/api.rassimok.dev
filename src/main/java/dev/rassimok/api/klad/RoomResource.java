@@ -16,6 +16,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.resteasy.reactive.RestResponse;
 
 import java.util.Map;
+import java.util.regex.Pattern;
 
 // The session is checked first everywhere, so a request without one learns
 // nothing about the rooms.
@@ -28,6 +29,10 @@ public class RoomResource {
     private static final String FIELD_LISTED = "listed";
     private static final String LISTED_TRUE = "true";
     private static final String LISTED_FALSE = "false";
+    private static final String FIELD_AFTER = "after";
+    private static final String FIELD_TEXT = "text";
+    // Nine digits always fit an int, so no value of after can fail the conversion.
+    private static final Pattern AFTER_DIGITS = Pattern.compile("[0-9]{1,9}");
 
     @Inject
     Sessions sessions;
@@ -58,12 +63,18 @@ public class RoomResource {
         return Sessions.withRefreshedCookie(RestResponse.ResponseBuilder.ok(rooms.list()), signedIn);
     }
 
+    // Without after, the answer holds every chat message the caller may read.
     @GET
     @Path("/{id}")
     @Transactional
-    public RestResponse<RoomView> find(@PathParam(FIELD_ID) String id, @CookieParam(Sessions.COOKIE) String token) {
+    public RestResponse<RoomView> find(@PathParam(FIELD_ID) String id, @QueryParam(FIELD_AFTER) String after,
+                                       @CookieParam(Sessions.COOKIE) String token) {
         Sessions.SignedIn signedIn = sessions.require(token);
-        return ok(rooms.find(id, LobbyPlayer.of(signedIn.player())), signedIn);
+        if (null != after && !AFTER_DIGITS.matcher(after).matches()) {
+            throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_QUERY);
+        }
+        int afterNumber = null == after ? 0 : Integer.parseInt(after);
+        return ok(rooms.find(id, LobbyPlayer.of(signedIn.player()), afterNumber), signedIn);
     }
 
     @POST
@@ -136,6 +147,22 @@ public class RoomResource {
     public RestResponse<RoomView> start(@PathParam(FIELD_ID) String id, @CookieParam(Sessions.COOKIE) String token) {
         Sessions.SignedIn signedIn = sessions.require(token);
         return ok(rooms.start(id, LobbyPlayer.of(signedIn.player())), signedIn);
+    }
+
+    @POST
+    @Path("/{id}/messages")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Transactional
+    public RestResponse<RoomView.Message> send(@PathParam(FIELD_ID) String id, JsonNode body,
+                                               @CookieParam(Sessions.COOKIE) String token) {
+        Sessions.SignedIn signedIn = sessions.require(token);
+        String text = ChatTexts.normalize(JsonFields.text(body, FIELD_TEXT));
+        if (!ChatTexts.isValid(text)) {
+            throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_MESSAGE);
+        }
+        RoomView.Message message = rooms.send(id, LobbyPlayer.of(signedIn.player()), text);
+        return Sessions.withRefreshedCookie(RestResponse.ResponseBuilder.create(RestResponse.Status.CREATED, message),
+                signedIn);
     }
 
     private static RestResponse<RoomView> ok(RoomView room, Sessions.SignedIn signedIn) {

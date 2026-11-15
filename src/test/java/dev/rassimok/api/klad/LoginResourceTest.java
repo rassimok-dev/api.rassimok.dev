@@ -582,6 +582,53 @@ class LoginResourceTest {
     }
 
     @Test
+    void shouldRemoveGuestsMessages_whenVerify_givenGuestOfSameKindSentInRoom() {
+        // given
+        String email = TestPlayers.uniqueEmail("chat-merge");
+        createAccount(TestPlayers.uniqueNick("Merger"), email);
+        String hostNick = TestPlayers.uniqueNick("Host");
+        String host = TestPlayers.createGuest(hostNick, Rules.KIND_HUMAN);
+        String guestToken = TestPlayers.createGuest(TestPlayers.uniqueNick("Guest"), Rules.KIND_HUMAN);
+        String id = createRoom(host);
+        joinRoom(guestToken, id);
+        sendMessage(guestToken, id, "from the guest");
+        sendMessage(host, id, "from the host");
+        String code = requestCode(email);
+
+        // when
+        ValidatableResponse response = verify(guestToken, email, code);
+
+        // then
+        response.statusCode(200).body("merged", equalTo(true));
+        findRoom(host, id).statusCode(200).body("", equalTo(lobbyRoom(id, hostNick,
+                List.of(roomPlayer(hostNick, 1, true, true)),
+                List.of(chatMessage(2, 1, hostNick, true, "from the host")))));
+    }
+
+    @Test
+    void shouldKeepGuestsMessages_whenVerify_givenGuestBecomesAccount() {
+        // given
+        String hostNick = TestPlayers.uniqueNick("Host");
+        String host = TestPlayers.createGuest(hostNick, Rules.KIND_HUMAN);
+        String guestNick = TestPlayers.uniqueNick("Becomer");
+        String guestToken = TestPlayers.createGuest(guestNick, Rules.KIND_HUMAN);
+        String id = createRoom(host);
+        joinRoom(guestToken, id);
+        sendMessage(guestToken, id, "from the guest");
+        String email = TestPlayers.uniqueEmail("chat-becomer");
+        String code = requestCode(email);
+
+        // when
+        ValidatableResponse response = verify(guestToken, email, code);
+
+        // then
+        response.statusCode(200).body("merged", equalTo(false));
+        findRoom(host, id).statusCode(200).body("", equalTo(lobbyRoom(id, hostNick,
+                List.of(roomPlayer(hostNick, 1, true, true), roomPlayer(guestNick, 2, false, false)),
+                List.of(chatMessage(1, 2, guestNick, false, "from the guest")))));
+    }
+
+    @Test
     void shouldMergeNothing_whenVerify_givenSameAccountAlreadyOnDevice() throws SQLException {
         // given
         String email = TestPlayers.uniqueEmail("already-in");
@@ -1035,6 +1082,41 @@ class LoginResourceTest {
     private String createAccount(String nick, String kind, String email) {
         String guestToken = TestPlayers.createGuest(nick, kind);
         return tokenIn(verify(guestToken, email, requestCode(email)).statusCode(200).extract());
+    }
+
+    private static String createRoom(String token) {
+        return given().cookie(TestPlayers.COOKIE, token).when().post("/rooms").then().statusCode(201)
+                .extract().path("id");
+    }
+
+    private static void joinRoom(String token, String id) {
+        given().cookie(TestPlayers.COOKIE, token).when().post("/rooms/" + id + "/join").then().statusCode(200);
+    }
+
+    private static void sendMessage(String token, String id, String text) {
+        given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON).body(Map.of("text", text))
+                .when().post("/rooms/" + id + "/messages").then().statusCode(201);
+    }
+
+    private static ValidatableResponse findRoom(String token, String id) {
+        return given().cookie(TestPlayers.COOKIE, token).when().get("/rooms/" + id).then();
+    }
+
+    private static Map<String, Object> lobbyRoom(String id, String hostNick, List<Map<String, Object>> players,
+                                                 List<Map<String, Object>> messages) {
+        return Map.of("id", id, "state", "lobby", "host", Map.of("nick", hostNick), "players", players,
+                "level", Rules.LEVEL_MIN, "shape", Rules.SHAPE_LANDSCAPE, "size", Rules.ROOM_SIZE, "listed", true,
+                "messages", messages);
+    }
+
+    private static Map<String, Object> roomPlayer(String nick, int number, boolean isHost, boolean isYou) {
+        return Map.of("nick", nick, "kind", Rules.KIND_HUMAN, "ready", false, "host", isHost, "you", isYou,
+                "member", number);
+    }
+
+    private static Map<String, Object> chatMessage(int n, int member, String nick, boolean isYou, String text) {
+        return Map.of("n", n, "member", member, "nick", nick, "kind", Rules.KIND_HUMAN, "guest", true,
+                "you", isYou, "text", text);
     }
 
     private static void submitClear(String token, int level, int ticks, int chests) {

@@ -25,6 +25,7 @@ class ApiException extends RuntimeException {
     static final String INVALID_LISTED = "invalid_listed";
     static final String INVALID_LEVEL = "invalid_level";
     static final String INVALID_SHAPE = "invalid_shape";
+    static final String INVALID_MESSAGE = "invalid_message";
 
     private final Response.Status status;
     private final String code;

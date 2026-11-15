@@ -110,7 +110,7 @@ public class LoginResource {
         if (isGuestOfSameKind) {
             mergeGuest(devicePlayer, player);
             presence.forget(devicePlayer.id);
-            rooms.forget(devicePlayer.id);
+            rooms.forgetDeleted(devicePlayer.id);
         }
         player.lastSeenAt = now;
         String newToken = sessions.create(player, now);

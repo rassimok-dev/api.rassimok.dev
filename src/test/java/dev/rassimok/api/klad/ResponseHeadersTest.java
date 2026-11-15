@@ -39,6 +39,7 @@ class ResponseHeadersTest {
     private static final String READY_BODY = "{\"ready\":true}";
     private static final String LEVEL_BODY = "{\"level\":2,\"shape\":\"portrait\"}";
     private static final String LISTED_BODY = "{\"listed\":false}";
+    private static final String MESSAGE_BODY = "{\"text\":\"hi\"}";
 
     @TestHTTPResource("/clears")
     URI clearsUri;
@@ -82,7 +83,11 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", "text/plain", "ready", 415, "unsupported_media_type"),
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/level", "application/*", "{\"level\":1}", 415, "unsupported_media_type"),
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/listed", "text/plain", "listed", 415, "unsupported_media_type"),
-                Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", "application/json", "{\"ready\":", 400, "bad_request"));
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/ready", "application/json", "{\"ready\":", 400, "bad_request"),
+                Arguments.of("GET", "/rooms/AAAAAAAAAA?after=1", null, null, 401, "no_session"),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/messages", "application/json", MESSAGE_BODY, 401, "no_session"),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/messages", "text/plain", "hi", 415, "unsupported_media_type"),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/messages", "application/json", "{\"text\":", 400, "bad_request"));
     }
 
     // Every endpoint that reads a JSON body belongs here. Routing already
@@ -106,7 +111,9 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/level", null, LEVEL_BODY),
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/level", "application/octet-stream", LEVEL_BODY),
                 Arguments.of("POST", "/rooms/AAAAAAAAAA/listed", null, LISTED_BODY),
-                Arguments.of("POST", "/rooms/AAAAAAAAAA/listed", "application/octet-stream", LISTED_BODY));
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/listed", "application/octet-stream", LISTED_BODY),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/messages", null, MESSAGE_BODY),
+                Arguments.of("POST", "/rooms/AAAAAAAAAA/messages", "application/octet-stream", MESSAGE_BODY));
     }
 
     // A valid player body, so only the size can refuse it. The input stream
@@ -167,6 +174,30 @@ class ResponseHeadersTest {
 
         // then
         assertSecurityHeaders(response.statusCode(200)).contentType(ContentType.JSON);
+    }
+
+    @Test
+    void shouldSendSecurityHeaders_whenSendMessage_givenAcceptedInvalidAndRateLimited() {
+        // given
+        String token = TestPlayers.createGuest("Chatter", Rules.KIND_HUMAN);
+        String id = given().cookie(TestPlayers.COOKIE, token).when().post("/rooms")
+                .then().statusCode(201).extract().path("id");
+        RequestSpecification chat = given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON);
+
+        // when
+        ValidatableResponse accepted = chat.body(MESSAGE_BODY).when().post("/rooms/" + id + "/messages").then();
+        ValidatableResponse invalid = chat.body("{\"text\":\"\"}").when().post("/rooms/" + id + "/messages").then();
+        for (int i = 1; i < Rules.CHAT_MESSAGES_PER_WINDOW; i++) {
+            chat.body(MESSAGE_BODY).when().post("/rooms/" + id + "/messages").then().statusCode(201);
+        }
+        ValidatableResponse limited = chat.body(MESSAGE_BODY).when().post("/rooms/" + id + "/messages").then();
+
+        // then
+        assertSecurityHeaders(accepted.statusCode(201)).contentType(ContentType.JSON);
+        assertSecurityHeaders(invalid.statusCode(400)).contentType(ContentType.JSON)
+                .body("error", equalTo("invalid_message"));
+        assertSecurityHeaders(limited.statusCode(429)).contentType(ContentType.JSON)
+                .body("error", equalTo("rate_limited"));
     }
 
     @Test

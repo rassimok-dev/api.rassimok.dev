@@ -61,10 +61,15 @@ class RoomResourceTest {
     private static final String READY = "{\"ready\":true}";
     private static final String LEVEL = "{\"level\":4,\"shape\":\"portrait\"}";
     private static final String LINK_ONLY = "{\"listed\":false}";
+    private static final String LEVEL_THREE = "level 3?";
+    private static final String MESSAGE = "{\"text\":\"level 3?\"}";
     private static final Set<String> LIST_FIELDS = Set.of("id", "state", "host", "players", "size", "level", "shape");
 
     @TestHTTPResource("/rooms/" + UNKNOWN_ID + "/ready")
     URI unknownReadyUri;
+
+    @TestHTTPResource("/rooms/" + UNKNOWN_ID + "/messages")
+    URI unknownMessagesUri;
 
     DevServicesContext devServices;
 
@@ -76,12 +81,14 @@ class RoomResourceTest {
                 Arguments.of("POST", "/rooms?listed=yes", null),
                 Arguments.of("GET", "/rooms", null),
                 Arguments.of("GET", "/rooms/" + UNKNOWN_ID, null),
+                Arguments.of("GET", "/rooms/" + UNKNOWN_ID + "?after=x", null),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/join", null),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/leave", null),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/ready", READY),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/level", LEVEL),
                 Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/listed", LINK_ONLY),
-                Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/start", null));
+                Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/start", null),
+                Arguments.of("POST", "/rooms/" + UNKNOWN_ID + "/messages", MESSAGE));
     }
 
     // Each case starts a room of its own, then tries one lobby action on it.
@@ -153,7 +160,7 @@ class RoomResourceTest {
                 .body("id", matchesPattern("[A-Za-z0-9_-]{10}"));
         String id = created.extract().path("id");
         find(token, id).statusCode(200)
-                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, false, true)))));
+                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true)))));
     }
 
     @Test
@@ -184,7 +191,7 @@ class RoomResourceTest {
         // then
         find(other, firstId).statusCode(404).body("", equalTo(Map.of("error", ApiException.NOT_FOUND)));
         find(host, secondId).statusCode(200)
-                .body("", equalTo(room(secondId, LOBBY, HOST, List.of(member(HOST, false, true)))));
+                .body("", equalTo(room(secondId, LOBBY, HOST, List.of(member(HOST, 1, false, true)))));
     }
 
     @Test
@@ -207,9 +214,9 @@ class RoomResourceTest {
 
         // then
         Map<String, Object> expected = room(id, LOBBY, HOST,
-                List.of(member(HOST, false, true), member(GUEST, false, false)));
+                List.of(member(HOST, 1, false, true), member(GUEST, 2, false, false)));
         joined.statusCode(200).body("", equalTo(roomSeenBy(GUEST, id, LOBBY, HOST,
-                List.of(member(HOST, false, true), member(GUEST, false, false)))));
+                List.of(member(HOST, 1, false, true), member(GUEST, 2, false, false)))));
         find(host, id).statusCode(200).body("", equalTo(expected));
     }
 
@@ -293,9 +300,9 @@ class RoomResourceTest {
 
         // then
         joined.statusCode(200).body("", equalTo(roomSeenBy("Mover", secondId, LOBBY, "SecondHost",
-                List.of(member("SecondHost", false, true), member("Mover", false, false)))));
+                List.of(member("SecondHost", 1, false, true), member("Mover", 2, false, false)))));
         find(firstHost, firstId).statusCode(200)
-                .body("", equalTo(room(firstId, LOBBY, "FirstHost", List.of(member("FirstHost", false, true)))));
+                .body("", equalTo(room(firstId, LOBBY, "FirstHost", List.of(member("FirstHost", 1, false, true)))));
     }
 
     @Test
@@ -352,7 +359,7 @@ class RoomResourceTest {
         // then
         left.statusCode(204).body(emptyString());
         find(host, id).statusCode(200)
-                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, false, true)))));
+                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true)))));
     }
 
     @Test
@@ -370,7 +377,7 @@ class RoomResourceTest {
         // then
         left.statusCode(204);
         find(second, id).statusCode(200).body("", equalTo(room(id, LOBBY, "Second",
-                List.of(member("Second", false, true), member("Third", false, false)))));
+                List.of(member("Second", 2, false, true), member("Third", 3, false, false)))));
     }
 
     @Test
@@ -424,6 +431,7 @@ class RoomResourceTest {
         expected.put("shape", Rules.SHAPE_LANDSCAPE);
         expected.put("size", Rules.ROOM_SIZE);
         expected.put("listed", true);
+        expected.put("messages", List.of());
         found.statusCode(200).body("", equalTo(expected));
     }
 
@@ -442,7 +450,7 @@ class RoomResourceTest {
 
         // then
         find(host, id).statusCode(200)
-                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, false, true)))));
+                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true)))));
         given().cookie(TestPlayers.COOKIE, host).when().get("/presence").then().statusCode(200)
                 .body("players.nick", not(hasItem(leavingNick)));
     }
@@ -462,7 +470,7 @@ class RoomResourceTest {
 
         // then
         find(host, id).statusCode(200)
-                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, false, true)))));
+                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true)))));
         given().cookie(TestPlayers.COOKIE, host).when().get("/presence").then().statusCode(200)
                 .body("players.nick", not(hasItem(leavingNick)));
     }
@@ -491,9 +499,9 @@ class RoomResourceTest {
 
         // then
         ready.statusCode(200).body("", equalTo(roomSeenBy(GUEST, id, LOBBY, HOST,
-                List.of(member(HOST, true, true), member(GUEST, true, false)))));
+                List.of(member(HOST, 1, true, true), member(GUEST, 2, true, false)))));
         unready.statusCode(200).body("", equalTo(room(id, LOBBY, HOST,
-                List.of(member(HOST, false, true), member(GUEST, true, false)))));
+                List.of(member(HOST, 1, false, true), member(GUEST, 2, true, false)))));
     }
 
     // The body is checked before the room, so an unknown id is enough here.
@@ -552,8 +560,8 @@ class RoomResourceTest {
 
         // then
         response.statusCode(200).body("", equalTo(Map.of("id", id, "state", LOBBY, "host", Map.of("nick", HOST),
-                "players", List.of(withYou(member(HOST, false, true))), "level", 4, "shape", Rules.SHAPE_PORTRAIT,
-                "size", Rules.ROOM_SIZE, "listed", true)));
+                "players", List.of(withYou(member(HOST, 1, false, true))), "level", 4, "shape", Rules.SHAPE_PORTRAIT,
+                "size", Rules.ROOM_SIZE, "listed", true, "messages", List.of())));
     }
 
     @Test
@@ -608,10 +616,10 @@ class RoomResourceTest {
 
         // then
         Map<String, Object> expected = room(id, STARTING, HOST,
-                List.of(member(HOST, true, true), member(GUEST, true, false)));
+                List.of(member(HOST, 1, true, true), member(GUEST, 2, true, false)));
         started.statusCode(200).body("", equalTo(expected));
         find(other, id).statusCode(200).body("", equalTo(roomSeenBy(GUEST, id, STARTING, HOST,
-                List.of(member(HOST, true, true), member(GUEST, true, false)))));
+                List.of(member(HOST, 1, true, true), member(GUEST, 2, true, false)))));
     }
 
     @Test
@@ -719,7 +727,7 @@ class RoomResourceTest {
         ValidatableResponse response = postJson(host, "/rooms/" + id + "/listed", LINK_ONLY);
 
         // then
-        response.statusCode(200).body("", equalTo(linkOnly(room(id, LOBBY, HOST, List.of(member(HOST, false, true))))));
+        response.statusCode(200).body("", equalTo(linkOnly(room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true))))));
     }
 
     @Test
@@ -758,7 +766,7 @@ class RoomResourceTest {
         // then
         String id = created.statusCode(201).body("", aMapWithSize(1)).extract().path("id");
         find(token, id).statusCode(200)
-                .body("", equalTo(linkOnly(room(id, LOBBY, HOST, List.of(member(HOST, false, true))))));
+                .body("", equalTo(linkOnly(room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true))))));
     }
 
     // The framework hands an empty value in as no value, so it means listed too.
@@ -774,7 +782,7 @@ class RoomResourceTest {
         // then
         String id = created.statusCode(201).body("", aMapWithSize(1)).extract().path("id");
         find(token, id).statusCode(200)
-                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, false, true)))));
+                .body("", equalTo(room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true)))));
     }
 
     @ParameterizedTest
@@ -801,6 +809,349 @@ class RoomResourceTest {
 
         // then
         response.statusCode(200).header("Set-Cookie", equalTo(Sessions.cookie(token)));
+    }
+
+    @Test
+    void shouldAnswerNoSession_whenSend_givenExistingRoomAndExpiredSession() throws SQLException {
+        // given
+        String token = guest(HOST);
+        String id = createRoom(token);
+        TestSql.execute(TestSql.devServicesDatabase(devServices),
+                "update session set expires_at = now() - interval '1 second' where token_hash = ?",
+                Sessions.hash(token));
+
+        // when
+        ValidatableResponse response = send(token, id, MESSAGE);
+
+        // then
+        response.statusCode(401).body("", equalTo(Map.of("error", ApiException.NO_SESSION)));
+    }
+
+    @Test
+    void shouldShowMessageToOtherMember_whenFind_givenMemberSent() {
+        // given
+        String host = guest(HOST);
+        String other = guest(GUEST);
+        String id = createRoom(host);
+        join(other, id).statusCode(200);
+
+        // when
+        ValidatableResponse sent = send(other, id, MESSAGE);
+
+        // then
+        sent.statusCode(201).header("Set-Cookie", nullValue())
+                .body("", equalTo(chatMessage(1, 2, GUEST, true, LEVEL_THREE)));
+        List<Map<String, Object>> members = List.of(member(HOST, 1, false, true), member(GUEST, 2, false, false));
+        find(host, id).statusCode(200).body("", equalTo(withMessages(room(id, LOBBY, HOST, members),
+                chatMessage(1, 2, GUEST, false, LEVEL_THREE))));
+        findAfter(other, id, "0").statusCode(200).body("", equalTo(withMessages(
+                roomSeenBy(GUEST, id, LOBBY, HOST, members), chatMessage(1, 2, GUEST, true, LEVEL_THREE))));
+    }
+
+    @Test
+    void shouldShowOnlyNewerMessages_whenFind_givenAfter() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+        send(host, id, "{\"text\":\"one\"}").statusCode(201);
+        send(host, id, "{\"text\":\"two\"}").statusCode(201);
+
+        // when
+        ValidatableResponse afterOne = findAfter(host, id, "1");
+        ValidatableResponse afterTwo = findAfter(host, id, "2");
+
+        // then
+        List<Map<String, Object>> members = List.of(member(HOST, 1, false, true));
+        afterOne.statusCode(200).body("", equalTo(withMessages(room(id, LOBBY, HOST, members),
+                chatMessage(2, 1, HOST, true, "two"))));
+        afterTwo.statusCode(200).body("", equalTo(room(id, LOBBY, HOST, members)));
+    }
+
+    // Quarkus REST hands an empty value in as none.
+    @Test
+    void shouldShowEveryMessage_whenFind_givenEmptyAfter() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+        send(host, id, MESSAGE).statusCode(201);
+
+        // when
+        ValidatableResponse response = findAfter(host, id, "");
+
+        // then
+        response.statusCode(200).body("messages", equalTo(List.of(chatMessage(1, 1, HOST, true, LEVEL_THREE))));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"x", "-1", "+5", "1.5", "1e3", " 1", "0x1", "1234567890", "2147483648",
+            "99999999999999999999"})
+    void shouldAnswerInvalidQuery_whenFind_givenAfterNotSmallNumber(String after) {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+
+        // when
+        ValidatableResponse response = findAfter(host, id, after);
+
+        // then
+        response.statusCode(400).body("", equalTo(Map.of("error", ApiException.INVALID_QUERY)));
+    }
+
+    @Test
+    void shouldAnswerInvalidQuery_whenFind_givenUnknownIdAndBadAfter() {
+        // when
+        ValidatableResponse response = findAfter(guest("Seeker"), UNKNOWN_ID, "x");
+
+        // then
+        response.statusCode(400).body("", equalTo(Map.of("error", ApiException.INVALID_QUERY)));
+    }
+
+    @Test
+    void shouldShowNoMembersAndNoMessages_whenFind_givenPlayerNotInRoom() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+        send(host, id, MESSAGE).statusCode(201);
+
+        // when
+        ValidatableResponse found = find(guest("Outsider"), id);
+
+        // then
+        found.statusCode(200).body("", equalTo(seenFromOutside(id, LOBBY)));
+    }
+
+    @Test
+    void shouldShowNoMessages_whenFind_givenMemberLeft() {
+        // given
+        String host = guest(HOST);
+        String other = guest(GUEST);
+        String id = createRoom(host);
+        join(other, id).statusCode(200);
+        send(other, id, MESSAGE).statusCode(201);
+        post(other, "/rooms/" + id + "/leave").statusCode(204);
+        send(host, id, "{\"text\":\"bye\"}").statusCode(201);
+
+        // when
+        ValidatableResponse found = find(other, id);
+
+        // then
+        found.statusCode(200).body("", equalTo(seenFromOutside(id, LOBBY)));
+    }
+
+    // The lobby leaves the room when it closes, so a player usually deletes
+    // their nick from outside it.
+    @Test
+    void shouldRemoveTheirMessages_whenDeleteAccount_givenPlayerSentAndLeftRoom() {
+        // given
+        String host = guest(HOST);
+        String leaving = guest(GUEST);
+        String id = createRoom(host);
+        join(leaving, id).statusCode(200);
+        send(leaving, id, MESSAGE).statusCode(201);
+        send(host, id, "{\"text\":\"bye\"}").statusCode(201);
+        post(leaving, "/rooms/" + id + "/leave").statusCode(204);
+
+        // when
+        given().cookie(TestPlayers.COOKIE, leaving).when().delete("/players/me").then().statusCode(204);
+
+        // then
+        find(host, id).statusCode(200).body("", equalTo(withMessages(
+                room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true))),
+                chatMessage(2, 1, HOST, true, "bye"))));
+    }
+
+    @Test
+    void shouldKeepTheirMessages_whenLogout_givenPlayerSentInRoom() {
+        // given
+        String host = guest(HOST);
+        String leaving = guest(GUEST);
+        String id = createRoom(host);
+        join(leaving, id).statusCode(200);
+        send(leaving, id, MESSAGE).statusCode(201);
+
+        // when
+        post(leaving, "/logout").statusCode(204);
+
+        // then
+        find(host, id).statusCode(200).body("", equalTo(withMessages(
+                room(id, LOBBY, HOST, List.of(member(HOST, 1, false, true))),
+                chatMessage(1, 2, GUEST, false, LEVEL_THREE))));
+    }
+
+    @Test
+    void shouldAnswerNotFound_whenSend_givenPlayerNotInRoom() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+
+        // when
+        ValidatableResponse response = send(guest("Outsider"), id, MESSAGE);
+
+        // then
+        response.statusCode(404).body("", equalTo(Map.of("error", ApiException.NOT_FOUND)));
+        find(host, id).statusCode(200).body("messages", equalTo(List.of()));
+    }
+
+    @Test
+    void shouldAnswerNotFound_whenSend_givenUnknownId() {
+        // when
+        ValidatableResponse response = send(guest("Sender"), UNKNOWN_ID, MESSAGE);
+
+        // then
+        response.statusCode(404).body("", equalTo(Map.of("error", ApiException.NOT_FOUND)));
+    }
+
+    @Test
+    void shouldShowOnlyLaterMessages_whenJoin_givenMessagesBeforeJoin() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+        send(host, id, "{\"text\":\"before\"}").statusCode(201);
+
+        // when
+        ValidatableResponse joined = join(guest(GUEST), id);
+        send(host, id, "{\"text\":\"after\"}").statusCode(201);
+
+        // then
+        joined.statusCode(200).body("", equalTo(roomSeenBy(GUEST, id, LOBBY, HOST,
+                List.of(member(HOST, 1, false, true), member(GUEST, 2, false, false)))));
+        find(host, id).statusCode(200).body("messages.text", equalTo(List.of("before", "after")));
+    }
+
+    @Test
+    void shouldCarryMessages_whenReady_givenMessageSent() {
+        // given
+        String host = guest(HOST);
+        String other = guest(GUEST);
+        String id = createRoom(host);
+        join(other, id).statusCode(200);
+        send(host, id, MESSAGE).statusCode(201);
+
+        // when
+        ValidatableResponse ready = postJson(other, "/rooms/" + id + "/ready", READY);
+
+        // then
+        ready.statusCode(200).body("", equalTo(withMessages(roomSeenBy(GUEST, id, LOBBY, HOST,
+                List.of(member(HOST, 1, false, true), member(GUEST, 2, true, false))),
+                chatMessage(1, 1, HOST, false, LEVEL_THREE))));
+    }
+
+    @Test
+    void shouldKeepNormalizedText_whenSend_givenSpacesAndFullwidthLetters() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+
+        // when
+        ValidatableResponse sent = send(host, id, "{\"text\":\"  \\uFF48\\uFF49 there  \"}");
+
+        // then
+        sent.statusCode(201).body("text", equalTo("hi there"));
+    }
+
+    @Test
+    void shouldAccept_whenSend_given120CyrillicLetters() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+        String text = "\u0436".repeat(Rules.CHAT_TEXT_LENGTH_MAX);
+
+        // when
+        ValidatableResponse sent = send(host, id, "{\"text\":\"" + text + "\"}");
+
+        // then
+        sent.statusCode(201).body("text", equalTo(text));
+    }
+
+    // Sent to an unknown room: the text is checked before the room.
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"text\":\"\"}",
+            "{\"text\":\"   \"}",
+            "{\"text\":\"line one\\nline two\"}",
+            "{\"text\":\"zero\\u200Bwidth\"}",
+            "{\"text\":\"\\u202Eright to left\"}",
+            "{\"text\":\"hi \\uD83D\\uDE00\"}",
+            "{\"text\":5}",
+            "{\"text\":null}",
+            "{\"text\":[\"hi\"]}",
+            "{}",
+            "[\"hi\"]",
+            "\"hi\""})
+    void shouldAnswerInvalidMessage_whenSend_givenTextNotAllowed(String body) {
+        // when
+        ValidatableResponse response = send(guest("Sender"), UNKNOWN_ID, body);
+
+        // then
+        response.statusCode(400).body("", equalTo(Map.of("error", ApiException.INVALID_MESSAGE)));
+    }
+
+    @Test
+    void shouldAnswerInvalidMessage_whenSend_given121Characters() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+        String text = "x".repeat(Rules.CHAT_TEXT_LENGTH_MAX + 1);
+
+        // when
+        ValidatableResponse response = send(host, id, "{\"text\":\"" + text + "\"}");
+
+        // then
+        response.statusCode(400).body("", equalTo(Map.of("error", ApiException.INVALID_MESSAGE)));
+        find(host, id).statusCode(200).body("messages", equalTo(List.of()));
+    }
+
+    @Test
+    void shouldAnswerRateLimitedAndKeepNothing_whenSend_givenSixthMessageAtOnce() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+        IntStream.rangeClosed(1, Rules.CHAT_MESSAGES_PER_WINDOW)
+                .forEach(i -> send(host, id, "{\"text\":\"message " + i + "\"}").statusCode(201).body("n", equalTo(i)));
+
+        // when
+        ValidatableResponse response = send(host, id, "{\"text\":\"sixth\"}");
+
+        // then
+        response.statusCode(429).body("", equalTo(Map.of("error", ApiException.RATE_LIMITED)));
+        find(host, id).statusCode(200).body("messages.n", equalTo(List.of(1, 2, 3, 4, 5)));
+    }
+
+    @Test
+    void shouldAnswerUnsupportedMediaType_whenSend_givenTextPlainBody() {
+        // given
+        String host = guest(HOST);
+        String id = createRoom(host);
+
+        // when
+        ValidatableResponse response = given().cookie(TestPlayers.COOKIE, host).contentType("text/plain")
+                .body(MESSAGE.getBytes(StandardCharsets.UTF_8)).when().post("/rooms/" + id + "/messages").then();
+
+        // then
+        response.statusCode(415).body("", equalTo(Map.of("error", "unsupported_media_type")));
+        find(host, id).statusCode(200).body("messages", equalTo(List.of()));
+    }
+
+    @Test
+    void shouldRefuseWithNoBody_whenSend_givenBodyOver4Kilobytes() throws Exception {
+        // given
+        String token = guest("Padded");
+        String body = "{\"text\":\"hi\",\"padding\":\"" + "x".repeat(5000) + "\"}";
+        HttpRequest request = HttpRequest.newBuilder(unknownMessagesUri)
+                .header("Cookie", TestPlayers.COOKIE + "=" + token)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        // when
+        HttpResponse<String> response;
+        try (HttpClient client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()) {
+            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+
+        // then
+        assertThat(response.statusCode(), equalTo(413));
+        assertThat(response.body(), equalTo(""));
     }
 
     private static String guest(String nick) {
@@ -842,9 +1193,28 @@ class RoomResourceTest {
         return null == body ? request : request.contentType(ContentType.JSON).body(body);
     }
 
-    private static Map<String, Object> member(String nick, boolean isReady, boolean isHost) {
+    private static ValidatableResponse findAfter(String token, String id, String after) {
+        return given().cookie(TestPlayers.COOKIE, token).queryParam("after", after).when().get("/rooms/" + id).then();
+    }
+
+    private static ValidatableResponse send(String token, String id, String body) {
+        return postJson(token, "/rooms/" + id + "/messages", body);
+    }
+
+    private static Map<String, Object> chatMessage(int n, int member, String nick, boolean isYou, String text) {
+        return Map.of("n", n, "member", member, "nick", nick, "kind", Rules.KIND_HUMAN, "guest", true,
+                "you", isYou, "text", text);
+    }
+
+    private static Map<String, Object> withMessages(Map<String, Object> room, Object... messages) {
+        Map<String, Object> withMessages = new HashMap<>(room);
+        withMessages.put("messages", List.of(messages));
+        return withMessages;
+    }
+
+    private static Map<String, Object> member(String nick, int number, boolean isReady, boolean isHost) {
         return Map.of("nick", nick, "kind", Rules.KIND_HUMAN, "ready", isReady, "host", isHost,
-                "you", false);
+                "you", false, "member", number);
     }
 
     private static Map<String, Object> room(String id, String state, String hostNick,
@@ -858,7 +1228,8 @@ class RoomResourceTest {
                 .map(player -> viewerNick.equals(player.get("nick")) ? withYou(player) : player)
                 .toList();
         return Map.of("id", id, "state", state, "host", Map.of("nick", hostNick), "players", seenPlayers,
-                "level", Rules.LEVEL_MIN, "shape", Rules.SHAPE_LANDSCAPE, "size", Rules.ROOM_SIZE, "listed", true);
+                "level", Rules.LEVEL_MIN, "shape", Rules.SHAPE_LANDSCAPE, "size", Rules.ROOM_SIZE, "listed", true,
+                "messages", List.of());
     }
 
     private static Map<String, Object> seenFromOutside(String id, String state) {
@@ -871,6 +1242,7 @@ class RoomResourceTest {
         room.put("shape", Rules.SHAPE_LANDSCAPE);
         room.put("size", Rules.ROOM_SIZE);
         room.put("listed", true);
+        room.put("messages", List.of());
         return room;
     }
 

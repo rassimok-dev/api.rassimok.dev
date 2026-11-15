@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -30,6 +31,7 @@ class RoomStoreTest {
     private static final String STARTING = "starting";
     private static final String RACING = "racing";
     private static final Duration JUST_OVER_SILENCE = Rules.LOBBY_MEMBER_SILENCE.plusMillis(1);
+    private static final String LEVEL_THREE = "level 3?";
 
     private final LobbyPlayer alice = player("Alice");
     private final LobbyPlayer bob = player("Bob");
@@ -48,7 +50,7 @@ class RoomStoreTest {
         String id = rooms.create(alice);
 
         // then
-        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, false, true))));
+        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -72,7 +74,7 @@ class RoomStoreTest {
 
         // then
         assertNotFound(assertThrows(ApiException.class, () -> rooms.find(oldId, bob)));
-        assertThat(rooms.find(newId, alice), equalTo(room(newId, LOBBY, alice, member(alice, false, true))));
+        assertThat(rooms.find(newId, alice), equalTo(room(newId, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -110,8 +112,8 @@ class RoomStoreTest {
         String newId = rooms.create(bob);
 
         // then
-        assertThat(rooms.find(otherId, alice), equalTo(room(otherId, LOBBY, alice, member(alice, false, true))));
-        assertThat(rooms.find(newId, bob), equalTo(room(newId, LOBBY, bob, member(bob, false, true))));
+        assertThat(rooms.find(otherId, alice), equalTo(room(otherId, LOBBY, alice, member(alice, 1, false, true))));
+        assertThat(rooms.find(newId, bob), equalTo(room(newId, LOBBY, bob, member(bob, 1, false, true))));
     }
 
     @Test
@@ -136,7 +138,7 @@ class RoomStoreTest {
         String newId = rooms.create(alice);
 
         // then
-        assertThat(rooms.find(newId, alice), equalTo(room(newId, LOBBY, alice, member(alice, false, true))));
+        assertThat(rooms.find(newId, alice), equalTo(room(newId, LOBBY, alice, member(alice, 1, false, true))));
         assertNotFound(assertThrows(ApiException.class, () -> rooms.find(oldId, alice)));
         assertError(assertThrows(ApiException.class, () -> rooms.create(bob)),
                 Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
@@ -149,8 +151,8 @@ class RoomStoreTest {
         LobbyPlayer secondTwin = player("Twin");
         String id = rooms.create(firstTwin);
         rooms.join(id, secondTwin);
-        RoomView.RoomPlayer host = new RoomView.RoomPlayer("Twin", Rules.KIND_HUMAN, false, true, false);
-        RoomView.RoomPlayer guest = new RoomView.RoomPlayer("Twin", Rules.KIND_HUMAN, false, false, false);
+        RoomView.RoomPlayer host = new RoomView.RoomPlayer("Twin", Rules.KIND_HUMAN, false, true, false, 1);
+        RoomView.RoomPlayer guest = new RoomView.RoomPlayer("Twin", Rules.KIND_HUMAN, false, false, false, 2);
 
         // when
         RoomView seenByFirst = rooms.find(id, firstTwin);
@@ -158,9 +160,9 @@ class RoomStoreTest {
 
         // then
         assertThat(seenByFirst.players(), equalTo(List.of(
-                new RoomView.RoomPlayer("Twin", Rules.KIND_HUMAN, false, true, true), guest)));
+                new RoomView.RoomPlayer("Twin", Rules.KIND_HUMAN, false, true, true, 1), guest)));
         assertThat(seenBySecond.players(), equalTo(List.of(
-                host, new RoomView.RoomPlayer("Twin", Rules.KIND_HUMAN, false, false, true))));
+                host, new RoomView.RoomPlayer("Twin", Rules.KIND_HUMAN, false, false, true, 2))));
     }
 
     @Test
@@ -176,7 +178,7 @@ class RoomStoreTest {
         // then
         assertError(exception, Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
         assertThat(rooms.find(id, bob),
-                equalTo(roomSeenBy(bob, id, LOBBY, alice, member(alice, false, true), member(bob, false, false))));
+                equalTo(roomSeenBy(bob, id, LOBBY, alice, member(alice, 1, false, true), member(bob, 2, false, false))));
     }
 
     @Test
@@ -189,7 +191,7 @@ class RoomStoreTest {
         String id = rooms.create(alice);
 
         // then
-        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, false, true))));
+        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -278,7 +280,7 @@ class RoomStoreTest {
         RoomView room = rooms.find(id, renamed);
 
         // then
-        assertThat(room, equalTo(room(id, LOBBY, renamed, member(renamed, false, true))));
+        assertThat(room, equalTo(room(id, LOBBY, renamed, member(renamed, 1, false, true))));
     }
 
     @Test
@@ -292,7 +294,7 @@ class RoomStoreTest {
 
         // then
         assertThat(room, equalTo(roomSeenBy(carol, id, LOBBY, alice,
-                member(alice, false, true), member(bob, false, false), member(carol, false, false))));
+                member(alice, 1, false, true), member(bob, 2, false, false), member(carol, 3, false, false))));
     }
 
     @Test
@@ -317,7 +319,7 @@ class RoomStoreTest {
 
         // then
         RoomView.RoomPlayer[] members = fullRoomPlayers.stream()
-                .map(player -> member(player, false, alice.equals(player)))
+                .map(player -> member(player, fullRoomPlayers.indexOf(player) + 1, false, alice.equals(player)))
                 .toArray(RoomView.RoomPlayer[]::new);
         assertThat(room, equalTo(roomSeenBy(dave, id, LOBBY, alice, members)));
         assertThat(room.players().size(), equalTo(10));
@@ -332,7 +334,7 @@ class RoomStoreTest {
         RoomView room = rooms.join(id, bob);
 
         // then
-        assertThat(room, equalTo(roomSeenBy(bob, id, STARTING, alice, member(alice, true, true), member(bob, true, false))));
+        assertThat(room, equalTo(roomSeenBy(bob, id, STARTING, alice, member(alice, 1, true, true), member(bob, 2, true, false))));
     }
 
     @Test
@@ -359,8 +361,8 @@ class RoomStoreTest {
 
         // then
         assertThat(second,
-                equalTo(roomSeenBy(carol, secondId, LOBBY, bob, member(bob, false, true), member(carol, false, false))));
-        assertThat(rooms.find(firstId, alice), equalTo(room(firstId, LOBBY, alice, member(alice, false, true))));
+                equalTo(roomSeenBy(carol, secondId, LOBBY, bob, member(bob, 1, false, true), member(carol, 2, false, false))));
+        assertThat(rooms.find(firstId, alice), equalTo(room(firstId, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -377,7 +379,7 @@ class RoomStoreTest {
         // then
         assertError(exception, Response.Status.CONFLICT, ApiException.ROOM_FULL);
         assertThat(rooms.find(firstId, eve), equalTo(room(firstId, LOBBY, eve,
-                member(eve, false, true), member(frank, false, false))));
+                member(eve, 1, false, true), member(frank, 2, false, false))));
     }
 
     @Test
@@ -390,7 +392,7 @@ class RoomStoreTest {
         RoomView room = rooms.join(id, bob);
 
         // then
-        assertThat(room, equalTo(room(id, LOBBY, bob, member(bob, false, true))));
+        assertThat(room, equalTo(room(id, LOBBY, bob, member(bob, 2, false, true))));
     }
 
     @Test
@@ -428,7 +430,7 @@ class RoomStoreTest {
         rooms.leave(id, bob);
 
         // then
-        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, false, true))));
+        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -443,7 +445,7 @@ class RoomStoreTest {
 
         // then
         assertThat(rooms.find(id, bob),
-                equalTo(room(id, LOBBY, bob, member(bob, false, true), member(carol, false, false))));
+                equalTo(room(id, LOBBY, bob, member(bob, 2, false, true), member(carol, 3, false, false))));
     }
 
     @Test
@@ -455,7 +457,7 @@ class RoomStoreTest {
         rooms.leave(id, bob);
 
         // then
-        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, false, true))));
+        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -469,7 +471,7 @@ class RoomStoreTest {
 
         // then
         assertThat(room, equalTo(new RoomView(id, LOBBY, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE,
-                Rules.ROOM_SIZE, true)));
+                Rules.ROOM_SIZE, true, List.of())));
     }
 
     @Test
@@ -481,7 +483,7 @@ class RoomStoreTest {
         rooms.leave(id, alice);
 
         // then
-        assertThat(rooms.find(id, bob), equalTo(room(id, STARTING, bob, member(bob, true, true))));
+        assertThat(rooms.find(id, bob), equalTo(room(id, STARTING, bob, member(bob, 2, true, true))));
     }
 
     @Test
@@ -496,7 +498,7 @@ class RoomStoreTest {
 
         // then
         assertThat(rooms.find(id, bob),
-                equalTo(roomSeenBy(bob, id, LOBBY, bob, member(bob, false, true), member(carol, false, false))));
+                equalTo(roomSeenBy(bob, id, LOBBY, bob, member(bob, 2, false, true), member(carol, 3, false, false))));
     }
 
     @Test
@@ -508,7 +510,7 @@ class RoomStoreTest {
         rooms.forget(alice.id());
 
         // then
-        assertThat(rooms.find(id, bob), equalTo(room(id, STARTING, bob, member(bob, true, true))));
+        assertThat(rooms.find(id, bob), equalTo(room(id, STARTING, bob, member(bob, 2, true, true))));
     }
 
     @Test
@@ -520,7 +522,7 @@ class RoomStoreTest {
         rooms.forget(bob.id());
 
         // then
-        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, false, true))));
+        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -542,7 +544,7 @@ class RoomStoreTest {
         RoomView room = rooms.setReady(id, bob, true);
 
         // then
-        assertThat(room, equalTo(roomSeenBy(bob, id, LOBBY, alice, member(alice, false, true), member(bob, true, false))));
+        assertThat(room, equalTo(roomSeenBy(bob, id, LOBBY, alice, member(alice, 1, false, true), member(bob, 2, true, false))));
     }
 
     @Test
@@ -555,7 +557,7 @@ class RoomStoreTest {
         RoomView room = rooms.setReady(id, alice, false);
 
         // then
-        assertThat(room, equalTo(room(id, LOBBY, alice, member(alice, false, true))));
+        assertThat(room, equalTo(room(id, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -592,7 +594,8 @@ class RoomStoreTest {
 
         // then
         assertThat(room, equalTo(new RoomView(id, LOBBY, new RoomView.Host("Alice"),
-                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, false, true, true)), Rules.LEVEL_MAX, Rules.SHAPE_PORTRAIT, Rules.ROOM_SIZE, true)));
+                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, false, true, true, 1)), Rules.LEVEL_MAX,
+                Rules.SHAPE_PORTRAIT, Rules.ROOM_SIZE, true, List.of())));
     }
 
     @Test
@@ -661,7 +664,7 @@ class RoomStoreTest {
         RoomView room = rooms.start(id, alice);
 
         // then
-        assertThat(room, equalTo(room(id, STARTING, alice, member(alice, true, true), member(bob, true, false))));
+        assertThat(room, equalTo(room(id, STARTING, alice, member(alice, 1, true, true), member(bob, 2, true, false))));
     }
 
     @Test
@@ -761,7 +764,7 @@ class RoomStoreTest {
         RoomView room = rooms.find(id, alice);
 
         // then
-        assertThat(room, equalTo(room(id, LOBBY, alice, member(alice, false, true), member(bob, false, false))));
+        assertThat(room, equalTo(room(id, LOBBY, alice, member(alice, 1, false, true), member(bob, 2, false, false))));
     }
 
     @Test
@@ -777,7 +780,7 @@ class RoomStoreTest {
         RoomView room = rooms.find(id, alice);
 
         // then
-        assertThat(room, equalTo(room(id, LOBBY, alice, member(alice, false, true))));
+        assertThat(room, equalTo(room(id, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -794,7 +797,7 @@ class RoomStoreTest {
 
         // then
         assertThat(seenByBob, equalTo(seenFromOutside(id, LOBBY)));
-        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, false, true))));
+        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, 1, false, true))));
     }
 
     @Test
@@ -810,7 +813,7 @@ class RoomStoreTest {
         RoomView room = rooms.find(id, bob);
 
         // then
-        assertThat(room, equalTo(room(id, LOBBY, bob, member(bob, false, true))));
+        assertThat(room, equalTo(room(id, LOBBY, bob, member(bob, 2, false, true))));
     }
 
     @Test
@@ -827,7 +830,7 @@ class RoomStoreTest {
         RoomView room = rooms.find(id, alice);
 
         // then
-        assertThat(room, equalTo(room(id, LOBBY, alice, member(alice, false, true), member(bob, false, false))));
+        assertThat(room, equalTo(room(id, LOBBY, alice, member(alice, 1, false, true), member(bob, 2, false, false))));
     }
 
     @Test
@@ -845,7 +848,7 @@ class RoomStoreTest {
         RoomView room = rooms.find(id, alice);
 
         // then
-        assertThat(room, equalTo(room(id, STARTING, alice, member(alice, true, true), member(bob, true, false))));
+        assertThat(room, equalTo(room(id, STARTING, alice, member(alice, 1, true, true), member(bob, 2, true, false))));
     }
 
     @Test
@@ -860,7 +863,7 @@ class RoomStoreTest {
 
         // then
         assertThat(room, equalTo(new RoomView(id, LOBBY, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE,
-                Rules.ROOM_SIZE, true)));
+                Rules.ROOM_SIZE, true, List.of())));
     }
 
     @Test
@@ -1082,7 +1085,7 @@ class RoomStoreTest {
         RoomView room = rooms.setListed(id, alice, false);
 
         // then
-        assertThat(room, equalTo(linkOnly(room(id, LOBBY, alice, member(alice, false, true)))));
+        assertThat(room, equalTo(linkOnly(room(id, LOBBY, alice, member(alice, 1, false, true)))));
     }
 
     @Test
@@ -1129,7 +1132,7 @@ class RoomStoreTest {
         RoomView room = rooms.setListed(id, alice, false);
 
         // then
-        assertThat(room, equalTo(linkOnly(room(id, STARTING, alice, member(alice, true, true), member(bob, true, false)))));
+        assertThat(room, equalTo(linkOnly(room(id, STARTING, alice, member(alice, 1, true, true), member(bob, 2, true, false)))));
         assertThat(rooms.list(), equalTo(roomList()));
     }
 
@@ -1144,7 +1147,7 @@ class RoomStoreTest {
         rooms.leave(id, alice);
 
         // then
-        assertThat(rooms.find(id, bob), equalTo(linkOnly(room(id, LOBBY, bob, member(bob, false, true)))));
+        assertThat(rooms.find(id, bob), equalTo(linkOnly(room(id, LOBBY, bob, member(bob, 2, false, true)))));
     }
 
     @Test
@@ -1153,7 +1156,7 @@ class RoomStoreTest {
         String id = rooms.create(alice, false);
 
         // then
-        assertThat(rooms.find(id, alice), equalTo(linkOnly(room(id, LOBBY, alice, member(alice, false, true)))));
+        assertThat(rooms.find(id, alice), equalTo(linkOnly(room(id, LOBBY, alice, member(alice, 1, false, true)))));
         assertThat(rooms.list(), equalTo(roomList()));
     }
 
@@ -1182,6 +1185,597 @@ class RoomStoreTest {
         assertThat(rooms.list(), equalTo(roomList(listed(id, LOBBY, alice, 1))));
     }
 
+    @Test
+    void shouldKeepMessageWithSenderMarks_whenSend_givenMember() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+
+        // when
+        RoomView.Message sent = rooms.send(id, bob, LEVEL_THREE);
+
+        // then
+        assertThat(sent, equalTo(message(1, bob, 2, true, LEVEL_THREE)));
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true), member(bob, 2, false, false)),
+                message(1, bob, 2, false, LEVEL_THREE))));
+        assertThat(rooms.find(id, bob), equalTo(withMessages(
+                roomSeenBy(bob, id, LOBBY, alice, member(alice, 1, false, true), member(bob, 2, false, false)),
+                message(1, bob, 2, true, LEVEL_THREE))));
+    }
+
+    @Test
+    void shouldShowAccountAndKindOfSender_whenFind_givenAgentAccountSent() {
+        // given
+        LobbyPlayer agent = new LobbyPlayer(UUID.randomUUID(), "Robot", Rules.KIND_AGENT, false);
+        String id = rooms.create(alice);
+        rooms.join(id, agent);
+        rooms.send(id, agent, LEVEL_THREE);
+
+        // when
+        RoomView room = rooms.find(id, alice);
+
+        // then
+        assertThat(room.messages(), equalTo(List.of(
+                new RoomView.Message(1, 2, "Robot", Rules.KIND_AGENT, false, false, LEVEL_THREE))));
+    }
+
+    @Test
+    void shouldTellTwinsApart_whenFind_givenTwoGuestsWithSameNickSent() {
+        // given
+        LobbyPlayer firstTwin = player("Twin");
+        LobbyPlayer secondTwin = player("Twin");
+        String id = rooms.create(firstTwin);
+        rooms.join(id, secondTwin);
+        rooms.send(id, firstTwin, "first");
+        rooms.send(id, secondTwin, "second");
+
+        // when
+        RoomView room = rooms.find(id, secondTwin);
+
+        // then
+        assertThat(room.messages(), equalTo(List.of(
+                message(1, firstTwin, 1, false, "first"),
+                message(2, secondTwin, 2, true, "second"))));
+    }
+
+    @Test
+    void shouldKeepNickOfSending_whenFind_givenSenderRenamedLater() {
+        // given
+        String id = rooms.create(alice);
+        rooms.send(id, alice, "before");
+        LobbyPlayer renamed = new LobbyPlayer(alice.id(), "Alicia", alice.kind(), alice.isGuest());
+        rooms.send(id, renamed, "after");
+
+        // when
+        RoomView room = rooms.find(id, renamed);
+
+        // then
+        assertThat(room.messages(), equalTo(List.of(
+                message(1, alice, 1, true, "before"),
+                message(2, renamed, 1, true, "after"))));
+    }
+
+    @Test
+    void shouldAnswerNotFound_whenSend_givenPlayerNotInRoom() {
+        // given
+        String id = rooms.create(alice);
+
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.send(id, bob, LEVEL_THREE));
+
+        // then
+        assertNotFound(exception);
+        assertThat(rooms.find(id, alice), equalTo(room(id, LOBBY, alice, member(alice, 1, false, true))));
+    }
+
+    @Test
+    void shouldAnswerNotFound_whenSend_givenMemberWhoLeft() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.leave(id, bob);
+
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.send(id, bob, LEVEL_THREE));
+
+        // then
+        assertNotFound(exception);
+    }
+
+    @Test
+    void shouldAnswerNotFound_whenSend_givenUnknownId() {
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.send(UNKNOWN_ID, alice, LEVEL_THREE));
+
+        // then
+        assertNotFound(exception);
+    }
+
+    @Test
+    void shouldShowNoMessages_whenFind_givenPlayerNotInRoom() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, alice, LEVEL_THREE);
+        rooms.send(id, bob, "yes");
+
+        // when
+        RoomView room = rooms.find(id, carol);
+
+        // then
+        assertThat(room, equalTo(seenFromOutside(id, LOBBY)));
+    }
+
+    @Test
+    void shouldShowNoMessages_whenFind_givenMemberWhoLeft() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, LEVEL_THREE);
+        rooms.leave(id, bob);
+        rooms.send(id, alice, "bye");
+
+        // when
+        RoomView room = rooms.find(id, bob);
+
+        // then
+        assertThat(room, equalTo(seenFromOutside(id, LOBBY)));
+    }
+
+    @Test
+    void shouldShowOnlyLaterMessages_whenFind_givenPlayerJoinedAfterThem() {
+        // given
+        String id = rooms.create(alice);
+        rooms.send(id, alice, "one");
+        rooms.send(id, alice, "two");
+        rooms.join(id, bob);
+        rooms.send(id, alice, "three");
+
+        // when
+        RoomView seenByBob = rooms.find(id, bob);
+        RoomView seenByAlice = rooms.find(id, alice);
+
+        // then
+        assertThat(seenByBob, equalTo(withMessages(
+                roomSeenBy(bob, id, LOBBY, alice, member(alice, 1, false, true), member(bob, 2, false, false)),
+                message(3, alice, 1, false, "three"))));
+        assertThat(seenByAlice.messages(), equalTo(List.of(
+                message(1, alice, 1, true, "one"),
+                message(2, alice, 1, true, "two"),
+                message(3, alice, 1, true, "three"))));
+    }
+
+    @Test
+    void shouldGiveNewNumberAndOnlyLaterMessages_whenJoin_givenMemberLeftAndCameBack() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, "first visit");
+        rooms.leave(id, bob);
+        rooms.send(id, alice, "while away");
+
+        // when
+        RoomView joined = rooms.join(id, bob);
+        rooms.send(id, bob, "back");
+
+        // then
+        assertThat(joined, equalTo(
+                roomSeenBy(bob, id, LOBBY, alice, member(alice, 1, false, true), member(bob, 3, false, false))));
+        assertThat(rooms.find(id, bob).messages(), equalTo(List.of(message(3, bob, 3, true, "back"))));
+        assertThat(rooms.find(id, alice).messages(), equalTo(List.of(
+                message(1, bob, 2, false, "first visit"),
+                message(2, alice, 1, true, "while away"),
+                message(3, bob, 3, false, "back"))));
+    }
+
+    @Test
+    void shouldShowOnlyNewerMessages_whenFind_givenAfter() {
+        // given
+        String id = rooms.create(alice);
+        rooms.send(id, alice, "one");
+        rooms.send(id, alice, "two");
+        rooms.send(id, alice, "three");
+
+        // when
+        RoomView afterTwo = rooms.find(id, alice, 2);
+        RoomView afterThree = rooms.find(id, alice, 3);
+        RoomView afterNone = rooms.find(id, alice, 0);
+
+        // then
+        assertThat(afterTwo, equalTo(withMessages(room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(3, alice, 1, true, "three"))));
+        assertThat(afterThree.messages(), equalTo(List.of()));
+        assertThat(afterNone.messages().stream().map(RoomView.Message::n).toList(), equalTo(List.of(1, 2, 3)));
+    }
+
+    @Test
+    void shouldShowOnlyMessagesAfterJoin_whenFind_givenAfterBeforeJoin() {
+        // given
+        String id = rooms.create(alice);
+        rooms.send(id, alice, "one");
+        rooms.send(id, alice, "two");
+        rooms.join(id, bob);
+        rooms.send(id, alice, "three");
+
+        // when
+        RoomView room = rooms.find(id, bob, 1);
+
+        // then
+        assertThat(room.messages(), equalTo(List.of(message(3, alice, 1, false, "three"))));
+    }
+
+    @Test
+    void shouldShowAllMessages_whenJoinReadyLevelListedOrStart_givenMember() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, LEVEL_THREE);
+        List<RoomView.Message> expected = List.of(message(1, bob, 2, false, LEVEL_THREE));
+
+        // when
+        RoomView ready = rooms.setReady(id, alice, true);
+        RoomView level = rooms.chooseLevel(id, alice, Rules.LEVEL_MAX, Rules.SHAPE_PORTRAIT);
+        RoomView listed = rooms.setListed(id, alice, false);
+        RoomView joinedAgain = rooms.join(id, alice);
+        rooms.setReady(id, bob, true);
+        RoomView started = rooms.start(id, alice);
+
+        // then
+        assertThat(ready.messages(), equalTo(expected));
+        assertThat(level.messages(), equalTo(expected));
+        assertThat(listed.messages(), equalTo(expected));
+        assertThat(joinedAgain.messages(), equalTo(expected));
+        assertThat(started.messages(), equalTo(expected));
+    }
+
+    @Test
+    void shouldDropOldest_whenSend_givenThirtyFirstMessage() {
+        // given
+        String id = fullRoom();
+        for (int i = 1; i <= Rules.CHAT_MESSAGES_KEPT; i++) {
+            rooms.send(id, fullRoomPlayers.get(i % Rules.ROOM_SIZE), "message " + i);
+        }
+
+        // when
+        rooms.send(id, fullRoomPlayers.get(1), "message 31");
+
+        // then
+        List<RoomView.Message> expected = IntStream.rangeClosed(2, Rules.CHAT_MESSAGES_KEPT + 1)
+                .mapToObj(i -> {
+                    int senderIndex = i % Rules.ROOM_SIZE;
+                    return message(i, fullRoomPlayers.get(senderIndex), senderIndex + 1, 0 == senderIndex,
+                            "message " + i);
+                })
+                .toList();
+        assertThat(rooms.find(id, alice).messages(), equalTo(expected));
+    }
+
+    @Test
+    void shouldKeepThirtyMessages_whenFind_givenThirtyMessages() {
+        // given
+        String id = fullRoom();
+        for (int i = 1; i <= Rules.CHAT_MESSAGES_KEPT; i++) {
+            rooms.send(id, fullRoomPlayers.get(i % Rules.ROOM_SIZE), "message " + i);
+        }
+
+        // when
+        RoomView room = rooms.find(id, alice);
+
+        // then
+        assertThat(room.messages().stream().map(RoomView.Message::n).toList(),
+                equalTo(IntStream.rangeClosed(1, Rules.CHAT_MESSAGES_KEPT).boxed().toList()));
+    }
+
+    @Test
+    void shouldStartWithoutMessages_whenCreate_givenHostSentInOldRoom() {
+        // given
+        String oldId = rooms.create(alice);
+        rooms.join(oldId, bob);
+        rooms.send(oldId, alice, LEVEL_THREE);
+
+        // when
+        String newId = rooms.create(alice);
+
+        // then
+        assertNotFound(assertThrows(ApiException.class, () -> rooms.find(oldId, bob)));
+        assertThat(rooms.find(newId, alice), equalTo(room(newId, LOBBY, alice, member(alice, 1, false, true))));
+    }
+
+    @Test
+    void shouldTakeMessagesAlong_whenFind_givenRoomEmptyForMoreThan10Minutes() {
+        // given
+        String id = rooms.create(alice);
+        rooms.send(id, alice, LEVEL_THREE);
+        rooms.leave(id, alice);
+        clock.advance(Rules.EMPTY_ROOM_LIFETIME.plusMillis(1));
+
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.find(id, alice));
+
+        // then
+        assertNotFound(exception);
+    }
+
+    @Test
+    void shouldSendMessage_whenSend_givenRoomStarting() {
+        // given
+        String id = startedRoom();
+
+        // when
+        RoomView.Message sent = rooms.send(id, bob, LEVEL_THREE);
+
+        // then
+        assertThat(sent, equalTo(message(1, bob, 2, true, LEVEL_THREE)));
+        assertThat(rooms.find(id, alice).messages(), equalTo(List.of(message(1, bob, 2, false, LEVEL_THREE))));
+    }
+
+    @Test
+    void shouldRefuseAndKeepNothing_whenSend_givenSixthMessageWithinTenSeconds() {
+        // given
+        String id = rooms.create(alice);
+        sendFive(id, alice);
+        clock.advance(Rules.CHAT_WINDOW.minusMillis(1));
+
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.send(id, alice, "sixth"));
+
+        // then
+        assertError(exception, Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
+        assertThat(rooms.find(id, alice).messages().stream().map(RoomView.Message::text).toList(),
+                equalTo(List.of("message 1", "message 2", "message 3", "message 4", "message 5")));
+    }
+
+    @Test
+    void shouldAccept_whenSend_givenSixthMessageTenSecondsAfterFirstFive() {
+        // given
+        String id = rooms.create(alice);
+        sendFive(id, alice);
+        clock.advance(Rules.CHAT_WINDOW);
+
+        // when
+        RoomView.Message sent = rooms.send(id, alice, "sixth");
+
+        // then
+        assertThat(sent, equalTo(message(6, alice, 1, true, "sixth")));
+    }
+
+    @Test
+    void shouldNotCountRefusedMessage_whenSend_givenRefusedMessageInWindow() {
+        // given
+        String id = rooms.create(alice);
+        rooms.send(id, alice, "first");
+        clock.advance(Duration.ofSeconds(5));
+        for (int i = 0; i < Rules.CHAT_MESSAGES_PER_WINDOW - 1; i++) {
+            rooms.send(id, alice, "later");
+        }
+        clock.advance(Duration.ofSeconds(4));
+        assertThrows(ApiException.class, () -> rooms.send(id, alice, "refused"));
+        clock.advance(Duration.ofSeconds(1));
+
+        // when
+        RoomView.Message sent = rooms.send(id, alice, "accepted");
+
+        // then
+        assertThat(sent, equalTo(message(6, alice, 1, true, "accepted")));
+    }
+
+    @Test
+    void shouldStillRefuse_whenSend_givenSenderLeftAndJoinedAgain() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        sendFive(id, bob);
+        rooms.leave(id, bob);
+        rooms.join(id, bob);
+
+        // when
+        ApiException exception = assertThrows(ApiException.class, () -> rooms.send(id, bob, "sixth"));
+
+        // then
+        assertError(exception, Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
+    }
+
+    @Test
+    void shouldCountEachMemberApart_whenSend_givenOtherMemberAtLimit() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        sendFive(id, alice);
+
+        // when
+        RoomView.Message sent = rooms.send(id, bob, LEVEL_THREE);
+
+        // then
+        assertThat(sent, equalTo(message(6, bob, 2, true, LEVEL_THREE)));
+    }
+
+    @Test
+    void shouldKeepSender_whenFind_givenSenderOnlySentForMoreThan60Seconds() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        clock.advance(Duration.ofSeconds(50));
+        rooms.find(id, alice);
+        rooms.send(id, bob, LEVEL_THREE);
+        clock.advance(Duration.ofSeconds(50));
+
+        // when
+        RoomView room = rooms.find(id, alice);
+
+        // then
+        assertThat(room, equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true), member(bob, 2, false, false)),
+                message(1, bob, 2, false, LEVEL_THREE))));
+    }
+
+    @Test
+    void shouldNumberInOrderWithoutGaps_whenSend_givenEveryMemberAtOnce() throws Exception {
+        // given
+        String id = fullRoom();
+        List<Callable<Integer>> sends = fullRoomPlayers.stream()
+                .flatMap(player -> IntStream.range(0, Rules.CHAT_MESSAGES_PER_WINDOW)
+                        .<Callable<Integer>>mapToObj(i -> () -> rooms.send(id, player, player.nick() + " " + i).n()))
+                .toList();
+
+        // when
+        List<Integer> numbers = new ArrayList<>();
+        try (ExecutorService executor = Executors.newFixedThreadPool(16)) {
+            for (Future<Integer> number : executor.invokeAll(sends)) {
+                numbers.add(number.get());
+            }
+        }
+
+        // then
+        int sent = Rules.ROOM_SIZE * Rules.CHAT_MESSAGES_PER_WINDOW;
+        assertThat(numbers.stream().sorted().toList(), equalTo(IntStream.rangeClosed(1, sent).boxed().toList()));
+        assertThat(rooms.find(id, alice).messages().stream().map(RoomView.Message::n).toList(),
+                equalTo(IntStream.rangeClosed(sent - Rules.CHAT_MESSAGES_KEPT + 1, sent).boxed().toList()));
+    }
+
+    @Test
+    void shouldRemoveOnlyTheirMessages_whenForgetDeleted_givenMember() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.join(id, carol);
+        rooms.send(id, bob, "one");
+        rooms.send(id, alice, "two");
+        rooms.send(id, bob, "three");
+        rooms.send(id, carol, "four");
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true), member(carol, 3, false, false)),
+                message(2, alice, 1, true, "two"),
+                message(4, carol, 3, false, "four"))));
+    }
+
+    @Test
+    void shouldRemoveTheirMessages_whenForgetDeleted_givenPlayerLeftRoomEarlier() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, "one");
+        rooms.send(id, alice, "two");
+        rooms.leave(id, bob);
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(2, alice, 1, true, "two"))));
+    }
+
+    @Test
+    void shouldRemoveTheirMessagesFromBothRooms_whenForgetDeleted_givenPlayerMovedToOtherRoom() {
+        // given
+        String firstId = rooms.create(alice);
+        rooms.join(firstId, bob);
+        rooms.send(firstId, bob, "in the first");
+        rooms.send(firstId, alice, "stays in the first");
+        String secondId = rooms.create(carol);
+        rooms.join(secondId, bob);
+        rooms.send(secondId, carol, "stays in the second");
+        rooms.send(secondId, bob, "in the second");
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(firstId, alice), equalTo(withMessages(
+                room(firstId, LOBBY, alice, member(alice, 1, false, true)),
+                message(2, alice, 1, true, "stays in the first"))));
+        assertThat(rooms.find(secondId, carol), equalTo(withMessages(
+                room(secondId, LOBBY, carol, member(carol, 1, false, true)),
+                message(1, carol, 1, true, "stays in the second"))));
+    }
+
+    @Test
+    void shouldRemoveTheirMessages_whenForgetDeleted_givenPlayerRemovedAfterSilence() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, "one");
+        rooms.send(id, alice, "two");
+        clock.advance(Duration.ofSeconds(30));
+        rooms.find(id, alice);
+        clock.advance(Duration.ofSeconds(30).plusMillis(1));
+        rooms.find(id, alice);
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(2, alice, 1, true, "two"))));
+    }
+
+    @Test
+    void shouldRemoveMessagesUnderEveryNumber_whenForgetDeleted_givenPlayerLeftAndCameBack() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, "first visit");
+        rooms.leave(id, bob);
+        rooms.send(id, alice, "while away");
+        rooms.join(id, bob);
+        rooms.send(id, bob, "back");
+
+        // when
+        rooms.forgetDeleted(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(2, alice, 1, true, "while away"))));
+    }
+
+    @Test
+    void shouldGiveNextNumber_whenSend_givenDeletedPlayersLastMessagesRemoved() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, alice, "one");
+        rooms.send(id, bob, "two");
+        rooms.send(id, bob, "three");
+        rooms.forgetDeleted(bob.id());
+
+        // when
+        RoomView.Message sent = rooms.send(id, alice, "four");
+
+        // then
+        assertThat(sent, equalTo(message(4, alice, 1, true, "four")));
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(1, alice, 1, true, "one"),
+                message(4, alice, 1, true, "four"))));
+    }
+
+    @Test
+    void shouldKeepTheirMessages_whenForget_givenMemberSent() {
+        // given
+        String id = rooms.create(alice);
+        rooms.join(id, bob);
+        rooms.send(id, bob, "one");
+        rooms.send(id, alice, "two");
+
+        // when
+        rooms.forget(bob.id());
+
+        // then
+        assertThat(rooms.find(id, alice), equalTo(withMessages(
+                room(id, LOBBY, alice, member(alice, 1, false, true)),
+                message(1, bob, 2, false, "one"),
+                message(2, alice, 1, true, "two"))));
+    }
+
     private String fullRoom() {
         String id = rooms.create(alice);
         fullRoomPlayers.stream().skip(1).forEach(player -> rooms.join(id, player));
@@ -1200,6 +1794,12 @@ class RoomStoreTest {
     private void fillRooms(int count) {
         for (int i = 0; i < count; i++) {
             rooms.create(player("Filler" + i));
+        }
+    }
+
+    private void sendFive(String id, LobbyPlayer sender) {
+        for (int i = 1; i <= Rules.CHAT_MESSAGES_PER_WINDOW; i++) {
+            rooms.send(id, sender, "message " + i);
         }
     }
 
@@ -1238,8 +1838,8 @@ class RoomStoreTest {
         return new LobbyPlayer(UUID.randomUUID(), nick, Rules.KIND_HUMAN, true);
     }
 
-    private static RoomView.RoomPlayer member(LobbyPlayer player, boolean isReady, boolean isHost) {
-        return new RoomView.RoomPlayer(player.nick(), player.kind(), isReady, isHost, false);
+    private static RoomView.RoomPlayer member(LobbyPlayer player, int number, boolean isReady, boolean isHost) {
+        return new RoomView.RoomPlayer(player.nick(), player.kind(), isReady, isHost, false, number);
     }
 
     private static RoomView room(String id, String state, LobbyPlayer host, RoomView.RoomPlayer... players) {
@@ -1250,20 +1850,31 @@ class RoomStoreTest {
                                        RoomView.RoomPlayer... players) {
         List<RoomView.RoomPlayer> seenPlayers = Arrays.stream(players)
                 .map(player -> viewer.nick().equals(player.nick())
-                        ? new RoomView.RoomPlayer(player.nick(), player.kind(), player.isReady(), player.isHost(), true)
+                        ? new RoomView.RoomPlayer(player.nick(), player.kind(), player.isReady(), player.isHost(), true,
+                        player.member())
                         : player)
                 .toList();
         return new RoomView(id, state, new RoomView.Host(host.nick()), seenPlayers, Rules.LEVEL_MIN,
-                Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true);
+                Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true, List.of());
     }
 
     private static RoomView seenFromOutside(String id, String state) {
-        return new RoomView(id, state, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true);
+        return new RoomView(id, state, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true,
+                List.of());
     }
 
     private static RoomView linkOnly(RoomView room) {
         return new RoomView(room.id(), room.state(), room.host(), room.players(), room.level(), room.shape(),
-                room.size(), false);
+                room.size(), false, room.messages());
+    }
+
+    private static RoomView.Message message(int n, LobbyPlayer sender, int member, boolean isYou, String text) {
+        return new RoomView.Message(n, member, sender.nick(), sender.kind(), sender.isGuest(), isYou, text);
+    }
+
+    private static RoomView withMessages(RoomView room, RoomView.Message... messages) {
+        return new RoomView(room.id(), room.state(), room.host(), room.players(), room.level(), room.shape(),
+                room.size(), room.isListed(), List.of(messages));
     }
 
     private static RoomListView roomList(RoomListView.ListedRoom... listed) {

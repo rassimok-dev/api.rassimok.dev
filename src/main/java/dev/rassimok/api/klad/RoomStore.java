@@ -78,10 +78,16 @@ public class RoomStore {
     }
 
     synchronized RoomView find(String roomId, LobbyPlayer player) {
+        return find(roomId, player, 0);
+    }
+
+    // The answer holds the chat messages after the given number, so a late
+    // or lost answer loses none.
+    synchronized RoomView find(String roomId, LobbyPlayer player, int after) {
         Instant now = clock.instant();
         Room room = existingRoom(roomId, now);
         room.markSeen(player, now);
-        return room.view(player.id());
+        return room.view(player.id(), after);
     }
 
     // The player leaves their old room only once this one has taken them.
@@ -109,10 +115,18 @@ public class RoomStore {
         }
     }
 
-    // The player is gone for good (deleted, merged or signed out): out of
-    // their room in any state, with the host handover of a leave.
+    // The player signed out: out of their room in any state, with the host
+    // handover of a leave. Their chat messages stay.
     synchronized void forget(UUID playerId) {
         leaveCurrentRoom(playerId, clock.instant());
+    }
+
+    // The player is deleted (also a guest merged into an account): out of
+    // their room, and their chat messages out of every room, under the one
+    // lock, so a send in flight is either removed here or finds no member.
+    synchronized void forgetDeleted(UUID playerId) {
+        leaveCurrentRoom(playerId, clock.instant());
+        rooms.values().forEach(room -> room.removeMessagesOf(playerId));
     }
 
     // To a player who is not in it, the room is not found.
@@ -161,6 +175,23 @@ public class RoomStore {
         room.start(now);
         room.markSeen(player, now);
         return room.view(player.id());
+    }
+
+    // To a player who is not in it, the room is not found. The text stays in
+    // the room's memory only and is never logged, like an email address.
+    synchronized RoomView.Message send(String roomId, LobbyPlayer player, String text) {
+        Instant now = clock.instant();
+        Room room = existingRoom(roomId, now);
+        Room.Member member = room.member(player.id());
+        if (null == member) {
+            throw new ApiException(Response.Status.NOT_FOUND, ApiException.NOT_FOUND);
+        }
+        if (room.isOverMessageRate(player.id(), now)) {
+            throw new ApiException(Response.Status.TOO_MANY_REQUESTS, ApiException.RATE_LIMITED);
+        }
+        RoomView.Message message = room.send(member, player, text, now);
+        room.markSeen(player, now);
+        return message;
     }
 
     // A presence heartbeat counts as a poll of the player's room.

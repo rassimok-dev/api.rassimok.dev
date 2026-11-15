@@ -73,6 +73,12 @@ final class Rules {
     static final Duration LOBBY_MEMBER_SILENCE = Duration.ofSeconds(60);
     static final Duration EMPTY_ROOM_LIFETIME = Duration.ofMinutes(10);
 
+    // Room chat, kept in memory only: the last messages of each room.
+    static final int CHAT_TEXT_LENGTH_MAX = 120;
+    static final int CHAT_MESSAGES_KEPT = 30;
+    static final int CHAT_MESSAGES_PER_WINDOW = 5;
+    static final Duration CHAT_WINDOW = Duration.ofSeconds(10);
+
     // The race socket, contract section 8.
     static final Duration RACE_CONNECT_WAIT = Duration.ofSeconds(15);
     static final int RACE_COUNTDOWN_SECONDS = 3;

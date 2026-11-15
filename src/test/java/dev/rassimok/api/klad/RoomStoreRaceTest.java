@@ -276,9 +276,9 @@ class RoomStoreRaceTest {
         assertThat(aliceSocket.messages.getLast(), equalTo(COUNTDOWN));
         assertThat(carolSocket.messages.getLast(), equalTo(COUNTDOWN));
         assertThat(rooms.find(id, alice), equalTo(new RoomView(id, STARTING, new RoomView.Host("Alice"),
-                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, true, true, true),
-                        new RoomView.RoomPlayer("Carol", Rules.KIND_HUMAN, true, false, false)),
-                Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true)));
+                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, true, true, true, 1),
+                        new RoomView.RoomPlayer("Carol", Rules.KIND_HUMAN, true, false, false, 3)),
+                Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true, List.of())));
         assertThat(rooms.raceRefusal(id, bob.id()), equalTo(409));
     }
 
@@ -611,9 +611,9 @@ class RoomStoreRaceTest {
 
         // then
         assertThat(room, equalTo(new RoomView(race.id(), LOBBY, new RoomView.Host("Alice"),
-                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, false, true, true),
-                        new RoomView.RoomPlayer("Bob", Rules.KIND_HUMAN, false, false, false)),
-                Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true)));
+                List.of(new RoomView.RoomPlayer("Alice", Rules.KIND_HUMAN, false, true, true, 1),
+                        new RoomView.RoomPlayer("Bob", Rules.KIND_HUMAN, false, false, false, 2)),
+                Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true, List.of())));
     }
 
     @Test
@@ -634,6 +634,22 @@ class RoomStoreRaceTest {
     }
 
     @Test
+    void shouldKeepMessageAndSendNothingOnSockets_whenSend_givenRoomRacing() {
+        // given
+        Race race = racingRoom();
+
+        // when
+        RoomView.Message sent = rooms.send(race.id(), bob, "go go");
+
+        // then
+        assertThat(sent, equalTo(new RoomView.Message(1, 2, "Bob", Rules.KIND_HUMAN, true, true, "go go")));
+        assertThat(rooms.find(race.id(), alice).messages(),
+                equalTo(List.of(new RoomView.Message(1, 2, "Bob", Rules.KIND_HUMAN, true, false, "go go"))));
+        assertThat(race.alice().messages, equalTo(List.of()));
+        assertThat(race.bob().messages, equalTo(List.of()));
+    }
+
+    @Test
     void shouldShowNoMembers_whenFind_givenPlayerNotInRacingRoom() {
         // given
         Race race = racingRoom();
@@ -643,7 +659,7 @@ class RoomStoreRaceTest {
 
         // then
         assertThat(room, equalTo(new RoomView(race.id(), RACING, null, List.of(), Rules.LEVEL_MIN,
-                Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true)));
+                Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true, List.of())));
     }
 
     @Test
@@ -983,7 +999,8 @@ class RoomStoreRaceTest {
     }
 
     private static RoomView emptyLobby(String id) {
-        return new RoomView(id, LOBBY, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true);
+        return new RoomView(id, LOBBY, null, List.of(), Rules.LEVEL_MIN, Rules.SHAPE_LANDSCAPE, Rules.ROOM_SIZE, true,
+                List.of());
     }
 
     private static List<String> types(FakeSocket socket) {
