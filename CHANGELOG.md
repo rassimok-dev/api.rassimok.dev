@@ -3,6 +3,57 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-15 - Production logs are JSON, with a severity and the stack trace in one field
+
+Cloud Run sends the console to Cloud Logging, and until now every line
+arrived as plain text (RAS-51). The key `%prod.quarkus.log.console.json=true`
+did nothing: no JSON extension was installed, and Quarkus warned about an
+unrecognized key at every start. The user chose, on 2026-11-15, the
+`quarkus-logging-json` extension (Q1 A, no version, the Quarkus BOM 3.39.3
+manages it) and the extension's own configuration keys, no code (Q2 A).
+
+- `application.properties`: the dead key is renamed to the real one,
+  `%prod.quarkus.log.console.json.enabled=true`. The extension turns JSON on
+  in every profile once it is present, so `quarkus.log.console.json.enabled`
+  and `quarkus.log.file.json.enabled` are `false` otherwise: dev, `./mvnw
+  test` and the log file stay plain text. The file matters because the
+  native test launcher writes the binary's log to `target/quarkus.log`, and
+  `LoginRoundTripIT` reads the mock mailbox from it as text.
+- Fields: `key-overrides=level=severity,stack_trace=stack_trace`
+  and `exception-output-type=formatted`. Cloud Logging reads `severity`,
+  `message` and `timestamp` (the extension's default time key already
+  works); Error Reporting reads the stack trace from `message` or
+  `stack_trace`. `formatted` puts the whole trace, with causes, in one
+  string; the default `detailed` would give a nested object. `message` stays
+  the log message (`Unexpected error`), so the trace is not duplicated there.
+  The Quarkus `log-format=gcp` was tried and left out: it keeps the
+  camelCase `stackTrace`, a name Error Reporting is not documented to read.
+- `excluded-keys` drops `sequence`, `loggerClassName`, `threadId`, `mdc`,
+  `ndc`, `hostName`, `processName` and `processId`: no use for them in
+  Cloud Logging, and each adds bytes to every line. A line keeps
+  `timestamp`, `loggerName`, `severity`, `message`, `threadName` and, for an
+  exception, `stack_trace`.
+- No new log lines. The failed mail send keeps its fixed line with no
+  exception, so its JSON object has no `stack_trace`; no field carries an
+  email, a cookie or a secret.
+- Tests: `JsonLogFormatTest` (JVM, a test-only route that throws) proves one
+  JSON object with severity ERROR, message `Unexpected error` and the stack
+  trace; `JsonLogNativeIT` proves the same settings in the native binary
+  (severity INFO on a start line); `JsonLogMailFailureTest` proves the
+  failed mail send line has no `stack_trace` and no address. None can read a
+  console, so they put the console settings on the log file. `JsonLogSettings`
+  reads them from `application.properties` (every `quarkus.log.console.json.*`
+  key and `%prod...enabled`), so a dropped `enabled`, a mistyped
+  `key-overrides` or a changed `exception-output-type` fails the tests
+  (checked by mutation in review round 2). Not guarded: a mistyped
+  `excluded-keys` (the noise fields come back) and a dropped base
+  `enabled=false` (the `./mvnw test` console turns JSON).
+- Not yet known, to check after the deploy: the level names go out
+  unchanged (`WARN`, `FATAL`, `SEVERE` may not be mapped by Cloud Logging;
+  mapping them needs code), and the first stack trace line starts with ": "
+  before the exception class, which Error Reporting may not group on.
+  Both are open follow-ups, not promises of this entry.
+
 ## 2026-11-15 - Open rooms listed at GET /rooms, link-only rooms, no members seen from outside
 
 The lobby can show the open rooms, so a player can enter one without an
