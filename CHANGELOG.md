@@ -39,12 +39,17 @@ manages it) and the extension's own configuration keys, no code (Q2 A).
 - Tests: `JsonLogFormatTest` (JVM, a test-only route that throws) proves one
   JSON object with severity ERROR, message `Unexpected error` and the stack
   trace; `JsonLogNativeIT` proves the same settings in the native binary
-  (severity INFO on a start line). Neither can read a console, so both put
-  the same settings on the log file (`JsonLogSettings`); the console itself
-  was seen as JSON in the native run's output. The first stack trace line
-  starts with ": " before the exception class; that is how the extension
-  renders it, and whether Error Reporting groups on it is checked after the
-  first deploy.
+  (severity INFO on a start line); `JsonLogMailFailureTest` proves the
+  failed mail send line has no `stack_trace` and no address. None can read a
+  console, so they put the console settings on the log file. `JsonLogSettings`
+  reads them from `application.properties` (every `quarkus.log.console.json.*`
+  key and `%prod...enabled`), so a dropped or mistyped console key fails the
+  tests.
+- Not yet known, to check after the deploy: the level names go out
+  unchanged (`WARN`, `FATAL`, `SEVERE` may not be mapped by Cloud Logging;
+  mapping them needs code), and the first stack trace line starts with ": "
+  before the exception class, which Error Reporting may not group on.
+  Both are open follow-ups, not promises of this entry.
 
 ## 2026-11-15 - Open rooms listed at GET /rooms, link-only rooms, no members seen from outside
 
