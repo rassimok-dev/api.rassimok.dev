@@ -50,9 +50,10 @@ at most 30 messages per room, never in the database or a log line.
 
 - **Traffic.** In a room of 10 each socket already receives 45 positions
   a second (RAS-43). At the rate limit (5 per player per 10 s) the nine
-  others add 4.5 chat messages a second on average, each up to about 370
-  bytes (120 Cyrillic letters are 240 bytes of UTF-8, a Cyrillic nick up
-  to 32). The limit allows the
+  others add 4.5 chat messages a second on average, each up to about 500
+  bytes (120 dashes or curly quotes, which the allow-list admits, are 360
+  bytes of UTF-8; 120 Cyrillic letters are 240; a Cyrillic nick up to
+  32). The limit allows the
   5 back to back, so in the worst instant all nine others burst at once and
   one socket gets 45 chat frames in a row on top of the positions.
 - **Slow readers.** A socket with 8 unfinished sends is closed with 1008
@@ -87,7 +88,9 @@ at most 30 messages per room, never in the database or a log line.
   every member sending one `pos` in the same instant as all the others,
   with a `ping` every 20 s, as for RAS-43; then the members finish from
   slot 9 down. On top, every member sends chat by REST on threads of its
-  own, at the rate limit, each text 120 Cyrillic letters (the longest).
+  own, at the rate limit, each text 120 Cyrillic letters (the longest in
+  characters; 240 bytes, so the burst bytes below are about 1.35 times
+  under the 360-byte maximum of 120 dashes or curly quotes).
   In the burst rows all 10 members send 5 messages back to back in the
   same instant, every 10.5 s; in the spread row each member sends one
   every 2.1 s, the members staggered. Idle: 97.7 to 103.4 peak, 21.2 to
@@ -150,8 +153,9 @@ at most 30 messages per room, never in the database or a log line.
   and then its pong; a client `{"type":"chat","text":"hello"}` gets
   `bad_message` and the socket stays open.
 - `SocketGuardsTest` (+1): the whole cap (two rooms of 10) is opened with
-  clients that read nothing, every member sends 5 messages of the longest
-  text (the sixth is 429), the clients go, and the whole cap opens again.
+  clients that read nothing, every member sends 5 messages of 120
+  Cyrillic letters (the sixth is 429), the clients go, and the whole cap
+  opens again.
   `SocketRoute` gets `sendUnpromptedAtLimit` for this, so a later socket
   route has to say what its own traffic at its limits is; `RaceRoute`
   counts `chat` among the messages the route sends on its own.

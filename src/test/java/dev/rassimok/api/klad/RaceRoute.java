@@ -27,7 +27,7 @@ final class RaceRoute implements SocketRoute {
     private static final int PAIRS = 8;
     private static final int GROUP_PLAYERS = 2 * Rules.SOCKETS_OPEN_MAX;
     private static final Set<String> UNPROMPTED_TYPES = Set.of("state", "countdown", "go", "pos", "results", "chat");
-    // 120 Cyrillic letters of two bytes each: the longest chat text.
+    // 120 Cyrillic letters of two bytes each: the longest text in characters.
     private static final String LONGEST_CHAT_BODY = "{\"text\":\"" + "\u0416".repeat(Rules.CHAT_TEXT_LENGTH_MAX) + "\"}";
 
     private final List<String> pairTokens = new ArrayList<>();
@@ -118,7 +118,7 @@ final class RaceRoute implements SocketRoute {
         return UNPROMPTED_TYPES.contains(new JsonObject(message).getString("type"));
     }
 
-    // Every member sends the longest chat text as often as the rate limit
+    // Every member sends a 120-letter chat text as often as the rate limit
     // allows, so each socket gets the others' messages; one more is refused.
     @Override
     public void sendUnpromptedAtLimit(List<Seat> seats) {
