@@ -53,6 +53,9 @@ class ResponseHeadersTest {
     @TestHTTPResource("/logout")
     URI logoutUri;
 
+    @TestHTTPResource("/login/google/finish")
+    URI googleFinishUri;
+
     static Stream<Arguments> errors() {
         return Stream.of(
                 Arguments.of("GET", "/nowhere", null, null, 404, "not_found"),
@@ -76,6 +79,10 @@ class ResponseHeadersTest {
                 Arguments.of("POST", "/login/code", "application/json", CODE_BODY, 400, "invalid_email"),
                 Arguments.of("POST", "/login/verify", "application/json", VERIFY_BODY, 400, "invalid_code"),
                 Arguments.of("POST", "/logout", null, null, 401, "no_session"),
+                Arguments.of("POST", "/login/google/finish", null, null, 400, "no_google_login"),
+                Arguments.of("POST", "/login/google/finish", "application/json", "{}", 400, "no_google_login"),
+                Arguments.of("GET", "/login/google/finish", null, null, 405, "method_not_allowed"),
+                Arguments.of("POST", "/login/google", null, null, 405, "method_not_allowed"),
                 Arguments.of("POST", "/presence", null, null, 401, "no_session"),
                 Arguments.of("GET", "/rooms/AAAAAAAAAA", null, null, 401, "no_session"),
                 Arguments.of("GET", "/rooms", null, null, 401, "no_session"),
@@ -200,6 +207,25 @@ class ResponseHeadersTest {
                 .body("error", equalTo("rate_limited"));
     }
 
+    // The deploy passes no Google settings yet, and neither do these tests,
+    // so on the binary too the sign-in is off: back to the game, no cookie.
+    @ParameterizedTest
+    @ValueSource(strings = {"/login/google", "/login/google/callback",
+            "/login/google/callback?state=JATmI6-W3FGpAF255TvletaKBsf40sWTkhIbHoWaVGM&code=4%2F0Ab"})
+    void shouldSendBackToGameWithoutCookie_whenStartOrReturnFromGoogle_givenGoogleSettingsMissing(String path) {
+        // when
+        ValidatableResponse response = given().redirects().follow(false)
+                .cookie("klad_oauth", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE")
+                .when().get(path)
+                .then();
+
+        // then
+        assertSecurityHeaders(response.statusCode(302))
+                .header("Location", "https://rassimok.dev/klad/#login=google-unavailable")
+                .header("Set-Cookie", nullValue())
+                .body(equalTo(""));
+    }
+
     @Test
     void shouldIgnoreBody_whenGetBoard_givenBodyWithMalformedContentType() {
         // when
@@ -256,6 +282,25 @@ class ResponseHeadersTest {
         assertThat(response.body(), equalTo(""));
         given().cookie(TestPlayers.COOKIE, token).when().get("/players/me")
                 .then().statusCode(401).body("error", equalTo(ApiException.NO_SESSION));
+    }
+
+    // Finish reads no body, so an empty chunked one with no type is not a 415.
+    @Test
+    void shouldAnswerNoGoogleLogin_whenFinishGoogleLogin_givenEmptyChunkedBodyWithoutContentType() throws Exception {
+        // given
+        HttpRequest request = HttpRequest.newBuilder(googleFinishUri)
+                .POST(HttpRequest.BodyPublishers.ofInputStream(() -> new ByteArrayInputStream(new byte[0])))
+                .build();
+
+        // when
+        HttpResponse<String> response;
+        try (HttpClient client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()) {
+            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+
+        // then
+        assertThat(response.statusCode(), equalTo(400));
+        assertThat(response.body(), equalTo("{\"error\":\"no_google_login\"}"));
     }
 
     @Test

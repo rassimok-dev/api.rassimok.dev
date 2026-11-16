@@ -57,6 +57,21 @@ final class Rules {
     // it stays short.
     static final Duration PURGE_INTERVAL = Duration.ofDays(1);
     static final int PURGE_BATCH = 1_000;
+    // Sign-in with Google. The temporary cookie and the verified address
+    // that waits for the finish both last this long from Google's return.
+    static final Duration GOOGLE_LOGIN_LIFETIME = Duration.ofMinutes(10);
+    // Only a real Google sign-in adds a waiting address. The returns already
+    // used are remembered so a replay costs no call to Google; any start adds
+    // one, so the oldest makes way and Google's single-use code stays the guard.
+    static final int GOOGLE_LOGINS_WAITING_MAX = 1_000;
+    static final int GOOGLE_RETURNS_REMEMBERED_MAX = 1_000;
+    // A slow Google holds at most this many request threads, each for at
+    // most the call timeout.
+    static final int GOOGLE_TOKEN_CALLS_PER_INSTANCE = 4;
+    static final Duration GOOGLE_CONNECT_TIMEOUT = Duration.ofSeconds(3);
+    static final Duration GOOGLE_TOKEN_CALL_TIMEOUT = Duration.ofSeconds(5);
+    // Google's codes are about 75 characters; this only bounds the work.
+    static final int GOOGLE_CODE_LENGTH_MAX = 1_024;
     // A WebSocket text message, counted in UTF-8 bytes.
     static final int SOCKET_MESSAGE_BYTES_MAX = 512;
     // Each open socket holds one of the instance's request slots on Cloud

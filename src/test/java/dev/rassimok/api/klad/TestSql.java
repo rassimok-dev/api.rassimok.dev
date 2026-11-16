@@ -81,6 +81,25 @@ final class TestSql {
         return ((Number) row(dataSource, sql, parameters).getFirst()).longValue();
     }
 
+    // The tables with a row holding the text anywhere, case ignored. Every
+    // table, so a table added later is checked too. position(), not like,
+    // because _ in an address is a like wildcard.
+    static List<String> tablesHolding(DataSource dataSource, String text) throws SQLException {
+        String tableNames = (String) row(dataSource, """
+                select string_agg(format('%I', table_name), ',' order by table_name)
+                from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'
+                """).getFirst();
+        List<String> holding = new ArrayList<>();
+        for (String table : tableNames.split(",")) {
+            String sql = "select count(*) from " + table
+                    + " stored where position(lower(?) in lower(stored::text)) > 0";
+            if (0 < count(dataSource, sql, text)) {
+                holding.add(table);
+            }
+        }
+        return holding;
+    }
+
     // Polls for up to 10 s until that many statements wait for a lock.
     static long awaitLockWaiters(DataSource dataSource, long expected) throws SQLException, InterruptedException {
         long waiters = lockWaiters(dataSource);

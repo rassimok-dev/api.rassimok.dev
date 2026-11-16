@@ -3,6 +3,193 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-16 (later) - Sign in with Google, merged switched off
+
+Players can open or create their klad account with Google instead of
+waiting for an emailed code (RAS-39, contract sections 1, 2 and 5). Google
+only proves the email address; from there the account rules of the code
+login apply unchanged. The user decided on 2026-11-15, as recommended:
+Q1 A a full-page trip, Q2 A a second short cookie, Q3 A three steps, Q4 A
+the nick prompt after the return, Q5 A one account per address, Q6 A
+scope `openid email` and nothing stored but `player.email`, Q7 A the
+address waits in memory, Q8 A the JDK's HTTP client and no new library,
+Q9 A client id and secret from Secret Manager, and Q13 B: this merges
+switched off.
+
+- **Switched off.** Without `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
+  the service starts as before, `GET /login/google` and its return send
+  the player to `https://rassimok.dev/klad/#login=google-unavailable` and
+  set no cookie, and `POST /login/google/finish` answers 400
+  `no_google_login`. `deploy.yml` is unchanged; the switch-on is the two
+  secrets (`google-oauth-client-id`, `google-oauth-client-secret`) in the
+  one `--set-secrets` flag, after RAS-41 and RAS-44.
+- **`GET /login/google`**: 302 to Google's authorization page with
+  `scope=openid email`, the exact redirect address
+  `https://rassimok.dev/klad/api/login/google/callback`, `state`, `nonce`
+  and a PKCE challenge (S256), and the cookie `klad_oauth` (32 random
+  bytes; `Path=/klad/api/login/google; HttpOnly; Secure; SameSite=Lax;
+  Max-Age=600`). Nothing is stored: `state`, `nonce` and the PKCE verifier
+  are HMAC-SHA256 of fixed labels keyed by the cookie.
+- **`GET /login/google/callback`**: always a 302 back to the game,
+  `#login=google`, `#login=google-failed` or `#login=google-unavailable`.
+  Refused before any call to Google: no cookie, a `state` that is not the
+  cookie's (constant time, exactly 43 characters), an `error` from Google,
+  no `code` or one over 1,024 characters, a return already used. Then one
+  POST to Google's token endpoint with `java.net.http.HttpClient` (3 s to
+  connect, 5 s for the whole call, at most 4 at once per instance), and
+  the ID token's claims: `iss`, `aud`, `exp`, `nonce`, `email_verified`
+  and a valid address after `Emails.normalize`. The verified address then
+  waits in memory for 10 minutes and the cookie is set again for as long.
+- **`POST /login/google/finish`**: reads no body; takes the waiting
+  address and runs exactly what `POST /login/verify` does after its code
+  check, now one method both call (`AccountLogins.signIn`, moved out of
+  `LoginResource.verify`). 401 `no_session` and 409 `nick_taken` leave the
+  address waiting, so the game creates a guest or renames it and finishes
+  again without a second trip to Google. 200 clears `klad_oauth`.
+- **Stored and logged.** The database gets only `player.email`, as after
+  a code login; no Google id, name, picture or token, and no migration.
+  Log lines name an HTTP status, an exception class or a claim
+  (`Google token call failed: status 400`, `Google ID token refused:
+  email_verified`), never an address, code, token or the secret.
+- **One lock for both logins.** `AccountLogins.signIn` takes a
+  transaction advisory lock on the address first
+  (`pg_advisory_xact_lock(hashtextextended(email, 0))`). Two devices
+  finishing a Google sign-in for the same new address at once would
+  otherwise both turn their guest into the account, and the second would
+  fail on `player.email`'s unique index with a 500 whose logged database
+  detail holds the address. Measured without the lock: the second finish
+  answered 500, and both Hibernate's warning and the `Unexpected error`
+  line carried `Key (email)=(<address>)`. Verify was already safe through
+  the code row lock; it now also takes the advisory lock, after the code
+  row, so the order is the same in both and nothing can deadlock.
+- `application.properties`: the client id and secret from the
+  environment, and the fixed addresses (Google's authorization and token
+  endpoints, the redirect address, the game) next to
+  `klad.websocket.allowed-origin`. No profile prefix, so a test resource
+  can set them.
+
+### Tests
+
+- Unit, fixed clock (`GoogleLoginsTest`, 73): the derived `state`,
+  `nonce`, verifier and challenge against `openssl dgst -hmac` vectors and
+  RFC 7636's example; the exact authorization address and cookies; the
+  state check (another cookie's state, one character more or less, a
+  malformed cookie); the code's length bound; settings missing or blank;
+  the claim checks, each failing claim refused (another issuer, an
+  audience list, `exp` now or past or not an integer, another nonce,
+  `email_verified` false, `"false"`, `"TRUE"`, 1, absent or null, an
+  invalid or missing address) and malformed tokens; the waiting address
+  given once, given back, kept to the second before 10 minutes and gone
+  at 10; the cap of 1,000 waiting addresses; used returns refused until
+  their 10 minutes are over, and at their cap of 1,000 the oldest makes
+  way without touching a waiting address.
+- `@QuarkusTest` against a fake Google (`FakeGoogle`, a test resource on
+  the JDK's HTTP server; it keeps no state, the test writes the code and
+  the code says who signed in and how the endpoint answers, and it checks
+  the client, the redirect address and the PKCE verifier as Google does):
+  `GoogleLoginResourceTest` (34) covers every "Done when" line of the
+  ticket: the exact `Location` and `Set-Cookie` of the start and of the
+  return; eight returns that sign nobody in and make no call (counted at
+  the fake); a reused return, also after a failed one; an error answer,
+  a non-JSON answer, an unverified address, another nonce, a code issued
+  for another start; a slow Google cut at 5 s; 4 slow calls in flight and
+  the fifth answered `google-unavailable` at once; a guest becoming the
+  account with nick, kind and results; a merge into an account made by
+  code and a guest of the other kind left alone; 401 then `POST /players`
+  then 200, and 409 then a rename then 200, both with no second call; an
+  account on the device and a new address (401); a second finish (400);
+  two devices finishing the same new address at once (both 200, one
+  account); a scan of every table after a sign-in (the address only in
+  `player`; the code, the tokens, `sub`, the secret, the cookie, the state
+  and the nonce nowhere); a scan of every log record of a sign-in with
+  three failures (only the three expected lines from `GoogleLogins`, none
+  holding an address, code, token, `sub`, cookie or the client secret).
+- `GoogleLoginRoundTripTest` (4): start, return and finish over HTTP only.
+  `GoogleLoginRoundTripIT` runs the same against the native binary, which
+  calls the fake over HTTPS: the fake serves a certificate made with the
+  JDK's `keytool` at start, and the binary gets a trust store holding only
+  that certificate through `javax.net.ssl.trustStore*` (GraalVM reads
+  these at run time). So the outgoing TLS call is proven in the image.
+- `ResponseHeadersTest` (+8), and so `ResponseHeadersIT` on the binary,
+  which runs without Google settings like production today: the start and
+  the return answer 302 to `#login=google-unavailable` with the three
+  headers and no `Set-Cookie` at all; finish answers 400
+  `no_google_login`, also with an empty chunked body and no type; the
+  405s.
+- `LoginResourceTest`, `LoginRoundTripTest` and the other login, logout
+  and deletion tests pass unchanged after the move to `AccountLogins`.
+- Runs: `./mvnw test` 1,147 JVM tests (1,028 before), and in the Mandrel
+  Linux container 299 native tests (287 before), all passing, against a
+  binary built after the last change to `src/main`.
+
+### Decisions worth not relitigating
+
+- **400 `no_google_login`** when no address waits for the cookie (none
+  sent, expired, finished, or the return failed): a code of its own, so
+  the game never confuses it with `no_session` (create a guest) or
+  `nick_taken` (rename).
+- **Both clocks from the return.** The start stores nothing, so the
+  server cannot know when it was; the successful return sets the cookie
+  again for 600 s and keeps the address for 10 minutes from the same
+  instant. The Google page and the nick prompt each get 10 minutes.
+- **A return is used once, a failed one too, and the store cannot be
+  flooded.** Any start yields a cookie and a state for free, so used
+  returns are kept apart from waiting addresses: 1,000 of them, the
+  oldest making way, for 10 minutes. A flood of fake returns costs a
+  token call each, pushes out only other used returns and never a
+  waiting address; Google's single-use code stays the guard behind them.
+  Only a real Google sign-in adds a waiting address (cap 1,000).
+- **`google-unavailable` when busy, `google-failed` otherwise.** All 4
+  token calls in flight or 1,000 addresses waiting means "try again
+  later"; everything else is a failed sign-in.
+- **`email_verified` as `true` or `"true"`.** Google's own example token
+  writes the string; real tokens carry the boolean. Anything else is
+  refused. `aud` must be a string equal to the client id; Google sends
+  one, so a list is refused rather than searched.
+- **The finish takes the address out while it runs** and gives it back
+  on any error, so of two finishes with one cookie exactly one signs in.
+  It rolls back its writes on an error (it has none to keep), while
+  verify keeps `dontRollbackOn` for its counted attempt; the shared method
+  joins the caller's transaction and has no annotation of its own.
+- **The return never answers JSON.** It is a full page in the browser,
+  so even an unexpected exception ends in `#login=google-failed`, with one
+  ERROR line naming only the exception class.
+- **HTTP/1.1, and the whole call bounded** with `sendAsync(...).get(5 s)`
+  plus the request timeout, so a slow body cannot hold a thread either;
+  the slot is released in `finally`.
+- **The advisory lock waits without a timeout,** unlike code requests:
+  it is held only by a login's own short transaction, never across a call
+  to Google or a mail. Mapping the `player_email_key` violation instead
+  would still have left the address in Hibernate's warning.
+- **Log lines may name a claim or say "busy".** Besides a status and an
+  exception class, `GoogleLogins` writes the name of the refused claim
+  (`iss`, `aud`, `exp`, `nonce`, `email_verified`, `email`) and
+  `Google sign-in refused: busy`: fixed words that tell why sign-ins fail
+  at the switch-on, with nothing from the player or from Google in them.
+- **No profile prefix on the Google settings.** `%prod.` would beat the
+  system properties a test resource sets for the native test; an empty
+  `${GOOGLE_CLIENT_ID:}` counts as missing, which is "off".
+- **`GoogleLoginRoundTrip` is an abstract class** that both
+  `GoogleLoginRoundTripTest` and `GoogleLoginRoundTripIT` extend, instead
+  of the IT extending the JVM test: test resources are inherited, and the
+  two need the fake set up differently (HTTP and HTTPS).
+- **`TestSql.tablesHolding`** is the table scan of `LoginResourceTest`,
+  shared for the new tests; the private copy in `LoginResourceTest` is
+  left as it is.
+- **The JVM tests talk to the fake over HTTP, the native test over
+  HTTPS.** The test JVM's default TLS context may already be fixed by an
+  earlier test class, and the production code keeps the default trust
+  store with no setting of its own; only the binary under test gets the
+  test trust store, through system properties.
+- **Not verified here:** the image's built-in CA store against Google's
+  real certificate; real browsers sending the `Lax` cookie on the return;
+  the native tests on the CI runner (the PR's test job runs only the JVM
+  tests, so `GoogleLoginRoundTripIT` first runs in the deploy job, before
+  any image is pushed); the memory the HTTP client and TLS take on the
+  256 MiB instance once switched on; and production. The production check of the switched-off state is the
+  `curl` of `/klad/api/login/google` after the deploy; the full sign-in is
+  checked in RAS-44 after the switch-on.
+
 ## 2026-11-16 - Chat in a race reaches the other members' race sockets at once
 
 The user wants players to write to each other in a game during a pause,
