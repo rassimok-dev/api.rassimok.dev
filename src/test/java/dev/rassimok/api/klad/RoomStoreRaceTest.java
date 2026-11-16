@@ -634,7 +634,7 @@ class RoomStoreRaceTest {
     }
 
     @Test
-    void shouldKeepMessageAndSendNothingOnSockets_whenSend_givenRoomRacing() {
+    void shouldKeepMessageAndSendChatToOtherSocketOnly_whenSend_givenRoomRacing() {
         // given
         Race race = racingRoom();
 
@@ -645,8 +645,270 @@ class RoomStoreRaceTest {
         assertThat(sent, equalTo(new RoomView.Message(1, 2, "Bob", Rules.KIND_HUMAN, true, true, "go go")));
         assertThat(rooms.find(race.id(), alice).messages(),
                 equalTo(List.of(new RoomView.Message(1, 2, "Bob", Rules.KIND_HUMAN, true, false, "go go"))));
-        assertThat(race.alice().messages, equalTo(List.of()));
-        assertThat(race.bob().messages, equalTo(List.of()));
+        assertThat(race.alice().messages, equalTo(List.of(chat(1, 2, 1, "Bob", "go go"))));
+        assertThat(race.bob().messages, empty());
+    }
+
+    @Test
+    void shouldSendChatToConnectedOthersOnly_whenSend_givenRoomStartingAndOneMemberNotConnected() {
+        // given
+        String id = startedRoom(alice, bob, carol);
+        FakeSocket aliceSocket = connect(id, alice);
+        FakeSocket bobSocket = connect(id, bob);
+        aliceSocket.messages.clear();
+        bobSocket.messages.clear();
+
+        // when
+        rooms.send(id, bob, "wait for me");
+
+        // then
+        assertThat(aliceSocket.messages, equalTo(List.of(chat(1, 2, 1, "Bob", "wait for me"))));
+        assertThat(bobSocket.messages, empty());
+    }
+
+    // The room poll shows it later; the socket does not replay it.
+    @Test
+    void shouldSendNoEarlierChat_whenConnect_givenChatSentBeforeMemberConnected() {
+        // given
+        String id = startedRoom(alice, bob, carol);
+        connect(id, alice);
+        connect(id, bob);
+        rooms.send(id, bob, "wait for me");
+
+        // when
+        FakeSocket carolSocket = connect(id, carol);
+
+        // then
+        assertThat(types(carolSocket), equalTo(List.of("state", "countdown")));
+        assertThat(rooms.find(id, carol).messages(),
+                equalTo(List.of(new RoomView.Message(1, 2, "Bob", Rules.KIND_HUMAN, true, false, "wait for me"))));
+    }
+
+    @Test
+    void shouldSendChatBetweenCountdownAndGo_whenSend_givenCountdownRunning() {
+        // given
+        String id = startedRoom(alice, bob);
+        FakeSocket aliceSocket = connect(id, alice);
+        FakeSocket bobSocket = connect(id, bob);
+        clock.advance(Duration.ofSeconds(1));
+
+        // when
+        rooms.send(id, bob, "ready");
+        clock.advance(Duration.ofSeconds(2));
+        rooms.advance();
+
+        // then
+        assertThat(types(aliceSocket), equalTo(List.of("state", "countdown", "chat", "go")));
+        assertThat(aliceSocket.messages.get(2), equalTo(chat(1, 2, 1, "Bob", "ready")));
+        assertThat(types(bobSocket), equalTo(List.of("state", "countdown", "go")));
+    }
+
+    @Test
+    void shouldSendChatToFinishedMember_whenSend_givenOtherMemberFinished() {
+        // given
+        Race race = racingRoom();
+        rooms.receive(race.id(), alice.id(), race.alice(), new RaceMessage.Finish(800));
+
+        // when
+        rooms.send(race.id(), bob, "well run");
+
+        // then
+        assertThat(race.alice().messages, equalTo(List.of(chat(1, 2, 1, "Bob", "well run"))));
+        assertThat(race.bob().messages, empty());
+    }
+
+    @Test
+    void shouldSendChatOfFinishedMember_whenSend_givenSenderFinished() {
+        // given
+        Race race = racingRoom();
+        rooms.receive(race.id(), alice.id(), race.alice(), new RaceMessage.Finish(800));
+
+        // when
+        rooms.send(race.id(), alice, "the exit is left");
+
+        // then
+        assertThat(race.bob().messages, equalTo(List.of(chat(1, 1, 0, "Alice", "the exit is left"))));
+        assertThat(race.alice().messages, empty());
+    }
+
+    @Test
+    void shouldSendNoChatToMemberWhoLeft_whenSend_givenRacing() {
+        // given
+        String id = startedRoom(alice, bob, carol);
+        FakeSocket aliceSocket = connect(id, alice);
+        FakeSocket bobSocket = connect(id, bob);
+        FakeSocket carolSocket = connect(id, carol);
+        clock.advance(Rules.RACE_COUNTDOWN);
+        rooms.advance();
+        rooms.leave(id, carol);
+        aliceSocket.messages.clear();
+        bobSocket.messages.clear();
+        carolSocket.messages.clear();
+
+        // when
+        rooms.send(id, bob, "bye Carol");
+
+        // then
+        assertThat(aliceSocket.messages, equalTo(List.of(chat(1, 2, 1, "Bob", "bye Carol"))));
+        assertThat(bobSocket.messages, empty());
+        assertThat(carolSocket.messages, empty());
+        assertThat(carolSocket.closeReason, equalTo(Room.RACE_OVER));
+    }
+
+    // Gone, but not yet counted as left: the room poll shows it after the race.
+    @Test
+    void shouldSendNoChatToGoneSocket_whenSend_givenMemberDisconnected() {
+        // given
+        Race race = racingRoom();
+        rooms.disconnect(race.id(), bob.id(), race.bob());
+
+        // when
+        rooms.send(race.id(), alice, "where are you");
+        FakeSocket bobSocket = connect(race.id(), bob);
+
+        // then
+        assertThat(race.bob().messages, empty());
+        assertThat(types(bobSocket), equalTo(List.of("state")));
+        assertThat(rooms.find(race.id(), bob).messages(),
+                equalTo(List.of(new RoomView.Message(1, 1, "Alice", Rules.KIND_HUMAN, true, false, "where are you"))));
+    }
+
+    @Test
+    void shouldSendChatToNewSocketOnly_whenSend_givenSocketReplaced() {
+        // given
+        Race race = racingRoom();
+        FakeSocket newBobSocket = connect(race.id(), bob);
+        newBobSocket.messages.clear();
+
+        // when
+        rooms.send(race.id(), alice, "hi");
+
+        // then
+        assertThat(race.bob().messages, empty());
+        assertThat(newBobSocket.messages, equalTo(List.of(chat(1, 1, 0, "Alice", "hi"))));
+    }
+
+    @Test
+    void shouldSendNoChat_whenSend_givenSixthMessageWithinWindow() {
+        // given
+        Race race = racingRoom();
+        for (int number = 1; number <= Rules.CHAT_MESSAGES_PER_WINDOW; number++) {
+            rooms.send(race.id(), bob, "message " + number);
+        }
+
+        // when
+        ApiException refused = assertThrows(ApiException.class, () -> rooms.send(race.id(), bob, "one too many"));
+
+        // then
+        assertThat(refused.status(), equalTo(Response.Status.TOO_MANY_REQUESTS));
+        assertThat(race.alice().messages, equalTo(IntStream.rangeClosed(1, Rules.CHAT_MESSAGES_PER_WINDOW)
+                .mapToObj(number -> chat(number, 2, 1, "Bob", "message " + number))
+                .toList()));
+        assertThat(race.bob().messages, empty());
+    }
+
+    @Test
+    void shouldSendNoChat_whenSend_givenPlayerNotInRacingRoom() {
+        // given
+        Race race = racingRoom();
+
+        // when
+        ApiException refused = assertThrows(ApiException.class, () -> rooms.send(race.id(), carol, "let me in"));
+
+        // then
+        assertThat(refused.status(), equalTo(Response.Status.NOT_FOUND));
+        assertThat(race.alice().messages, empty());
+        assertThat(race.bob().messages, empty());
+    }
+
+    // Everything one socket gets keeps the order the room made it in, and a
+    // chat message after the results reaches no socket.
+    @Test
+    void shouldKeepOrderWithPositionsAndResults_whenSend_givenRaceRunsToItsEnd() {
+        // given
+        Race race = racingRoom();
+
+        // when
+        rooms.receive(race.id(), alice.id(), race.alice(), new RaceMessage.Position(1, 1, 10));
+        rooms.send(race.id(), alice, "catch me");
+        rooms.receive(race.id(), alice.id(), race.alice(), new RaceMessage.Position(2, 1, 20));
+        rooms.send(race.id(), bob, "soon");
+        rooms.receive(race.id(), alice.id(), race.alice(), new RaceMessage.Finish(900));
+        rooms.receive(race.id(), bob.id(), race.bob(), new RaceMessage.Finish(950));
+        rooms.send(race.id(), alice, "good race");
+
+        // then
+        assertThat(types(race.bob()), equalTo(List.of("pos", "chat", "pos", "results")));
+        assertThat(race.bob().messages.get(1), equalTo(chat(1, 1, 0, "Alice", "catch me")));
+        assertThat(types(race.alice()), equalTo(List.of("chat", "results")));
+        assertThat(race.alice().messages.getFirst(), equalTo(chat(2, 2, 1, "Bob", "soon")));
+        assertThat(rooms.find(race.id(), bob).messages(), equalTo(List.of(
+                new RoomView.Message(1, 1, "Alice", Rules.KIND_HUMAN, true, false, "catch me"),
+                new RoomView.Message(2, 2, "Bob", Rules.KIND_HUMAN, true, true, "soon"),
+                new RoomView.Message(3, 1, "Alice", Rules.KIND_HUMAN, true, false, "good race"))));
+    }
+
+    // The send applies the race's end first, so the message is kept but the
+    // sockets get only the results.
+    @Test
+    void shouldKeepMessageAndSendNoChat_whenSend_givenRaceEndFellDue() {
+        // given
+        Race race = racingRoom();
+        pingBoth(race, Rules.RACE_CAP);
+
+        // when
+        rooms.send(race.id(), alice, "too late");
+
+        // then
+        assertThat(types(race.alice()), equalTo(List.of("results")));
+        assertThat(types(race.bob()), equalTo(List.of("results")));
+        assertThat(rooms.find(race.id(), bob).messages(),
+                equalTo(List.of(new RoomView.Message(1, 1, "Alice", Rules.KIND_HUMAN, true, false, "too late"))));
+    }
+
+    @Test
+    void shouldSendEachChatToTheNineOthersOnly_whenSend_givenRaceOfTen() {
+        // given
+        RaceOfTen race = racingRoomOfTen();
+
+        // when
+        for (int slot = 0; slot < race.players().size(); slot++) {
+            rooms.send(race.id(), race.players().get(slot), "from " + slot);
+        }
+
+        // then
+        for (int receiver = 0; receiver < race.players().size(); receiver++) {
+            int receiverSlot = receiver;
+            List<JsonObject> expected = IntStream.range(0, race.players().size())
+                    .filter(sender -> receiverSlot != sender)
+                    .mapToObj(sender -> chat(sender + 1, sender + 1, sender, race.players().get(sender).nick(),
+                            "from " + sender))
+                    .toList();
+            assertThat(race.sockets().get(receiver).messages, equalTo(expected));
+        }
+    }
+
+    // The marks are the sender's at the time of sending, as the room poll
+    // shows them; the text goes out as JSON whatever its quotes.
+    @Test
+    void shouldCarrySendersMarksAsSent_whenSend_givenAgentAccountRenamedDuringRace() {
+        // given
+        LobbyPlayer dana = new LobbyPlayer(UUID.randomUUID(), "Dana", Rules.KIND_AGENT, false);
+        LobbyPlayer renamedDana = new LobbyPlayer(dana.id(), "Danielle", Rules.KIND_AGENT, false);
+        String id = startedRoom(alice, dana);
+        FakeSocket aliceSocket = connect(id, alice);
+        connect(id, dana);
+        clock.advance(Rules.RACE_COUNTDOWN);
+        rooms.advance();
+        aliceSocket.messages.clear();
+        String text = "she said \"\u041F\u0440\u0438\u0432\u0435\u0442\" \\ ok";
+
+        // when
+        rooms.send(id, renamedDana, text);
+
+        // then
+        assertThat(aliceSocket.messages, equalTo(List.of(json("{'type':'chat','n':1,'member':2,'slot':1}")
+                .put("nick", "Danielle").put("kind", Rules.KIND_AGENT).put("guest", false).put("text", text))));
     }
 
     @Test
@@ -1009,6 +1271,12 @@ class RoomStoreRaceTest {
 
     private static JsonObject error(String code) {
         return json("{'type':'error'}").put("error", code);
+    }
+
+    // As a human guest sends it.
+    private static JsonObject chat(int number, int member, int slot, String nick, String text) {
+        return json("{'type':'chat','kind':'human','guest':true}").put("n", number).put("member", member)
+                .put("slot", slot).put("nick", nick).put("text", text);
     }
 
     // Single quotes keep the expected messages readable.

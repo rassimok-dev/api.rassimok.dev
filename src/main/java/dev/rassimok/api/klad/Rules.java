@@ -10,6 +10,7 @@ final class Rules {
     static final String FIELD_LEVEL = "level";
     static final String FIELD_SHAPE = "shape";
     static final String FIELD_TICKS = "ticks";
+    static final String FIELD_TEXT = "text";
 
     static final String KIND_HUMAN = "human";
     static final String KIND_AGENT = "agent";

@@ -501,6 +501,35 @@ class SocketGuardsTest {
         }
     }
 
+    // The whole cap of clients that read nothing gets what the route sends
+    // on its own at its limits (for the race, chat from every member); once
+    // those clients go, the whole cap opens again.
+    @ParameterizedTest
+    @MethodSource("routes")
+    void shouldOpenSocketsUpToCap_whenConnect_givenUnpromptedMessagesAtLimitToClientsNotReading(SocketRoute route)
+            throws Exception {
+        // given
+        List<Socket> silentClients = new ArrayList<>();
+        try {
+            List<SocketRoute.Seat> seats = route.newSeats(Rules.SOCKETS_OPEN_MAX);
+            for (SocketRoute.Seat seat : seats) {
+                silentClients.add(handshakeByHand(seat));
+            }
+            route.sendUnpromptedAtLimit(seats);
+        } finally {
+            for (Socket silentClient : silentClients) {
+                silentClient.close();
+            }
+        }
+
+        // when
+        int openSockets = openSocketsUpToCap(route);
+
+        // then
+        assertThat(silentClients.size(), equalTo(Rules.SOCKETS_OPEN_MAX));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+    }
+
     // A client that leaves during its session lookup must not stay counted,
     // or 20 such handshakes would refuse every later socket.
     @ParameterizedTest

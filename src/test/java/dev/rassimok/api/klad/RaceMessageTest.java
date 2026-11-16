@@ -65,7 +65,8 @@ class RaceMessageTest {
             "{\"type\":\"pos\",\"x\":1,\"y\":1,\"tick\":5.0}", "{\"type\":\"pos\",\"x\":1,\"y\":1,\"tick\":\"1\"}",
             "{\"type\":\"pos\",\"x\":1,\"y\":1,\"tick\":10000000000000000000}", "{\"type\":\"finish\"}",
             "{\"type\":\"finish\",\"ticks\":-5}", "{\"type\":\"finish\",\"ticks\":600.5}",
-            "{\"type\":\"finish\",\"ticks\":true}", "{\"type\":\"finish\",\"tick\":600}"})
+            "{\"type\":\"finish\",\"ticks\":true}", "{\"type\":\"finish\",\"tick\":600}", "{\"type\":\"chat\"}",
+            "{\"type\":\"chat\",\"text\":\"hello\"}"})
     void shouldReadBadMessage_whenParse_givenMalformedOrUnknownMessage(String text) {
         // when
         RaceMessage message = RaceMessage.parse(text);

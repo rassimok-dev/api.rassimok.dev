@@ -2,6 +2,7 @@ package dev.rassimok.api.klad;
 
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.http.ContentType;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.UpgradeRejectedException;
@@ -253,6 +254,116 @@ class RaceSocketTest {
         assertThat(readyMarks(id), equalTo(Collections.nCopies(10, false)));
     }
 
+    // Chat goes by REST and reaches the other members' sockets at once: before
+    // go, while racing, to a member who has finished, not to one who left. A
+    // ping right after a send gets the next frame, so an echo would show.
+    @Test
+    void shouldDeliverChatToOtherMembersOnly_whenSendMessage_givenWholeRaceOfThree() throws Exception {
+        // given
+        String id = RaceRooms.startedRoom(List.of(host().token(), guest().token(), third().token()));
+        RaceClient hostClient = connect(host(), id);
+        hostClient.next();
+        RaceClient guestClient = connect(guest(), id);
+        guestClient.next();
+        String quotedText = "\"\u041F\u0440\u0438\u0432\u0435\u0442\" \\ ok";
+
+        // when
+        List<Integer> statuses = new ArrayList<>();
+        statuses.add(sendMessage(guest(), id, "wait for me"));
+        JsonObject hostSeesBeforeGo = hostClient.next();
+        JsonObject guestAfterOwnBeforeGo = nextAfterPing(guestClient);
+        RaceClient thirdClient = connect(third(), id);
+        for (RaceClient racer : List.of(hostClient, guestClient, thirdClient)) {
+            racer.nextOfType("go");
+        }
+        statuses.add(sendMessage(third(), id, quotedText));
+        JsonObject hostSeesRacing = hostClient.next();
+        JsonObject guestSeesRacing = guestClient.next();
+        JsonObject thirdAfterOwn = nextAfterPing(thirdClient);
+        finishInTurn(hostClient, 800);
+        statuses.add(sendMessage(guest(), id, "well run"));
+        JsonObject finishedHostSees = hostClient.next();
+        JsonObject thirdSees = thirdClient.next();
+        JsonObject guestAfterOwn = nextAfterPing(guestClient);
+        given().cookie(TestPlayers.COOKIE, third().token()).when().post("/rooms/" + id + "/leave")
+                .then().statusCode(204);
+        String thirdClosing = thirdClient.closing();
+        statuses.add(sendMessage(host(), id, "bye"));
+        JsonObject guestSeesAfterLeave = guestClient.next();
+        JsonObject hostAfterOwn = nextAfterPing(hostClient);
+        guestClient.send("{\"type\":\"finish\",\"ticks\":900}");
+
+        // then
+        assertThat(statuses, equalTo(List.of(201, 201, 201, 201)));
+        assertThat(hostSeesBeforeGo, equalTo(chat(1, 2, 1, guest(), "wait for me")));
+        JsonObject fromThird = chat(2, 3, 2, third(), quotedText);
+        assertThat(hostSeesRacing, equalTo(fromThird));
+        assertThat(guestSeesRacing, equalTo(fromThird));
+        JsonObject fromGuest = chat(3, 2, 1, guest(), "well run");
+        assertThat(finishedHostSees, equalTo(fromGuest));
+        assertThat(thirdSees, equalTo(fromGuest));
+        assertThat(thirdClosing, equalTo(RACE_OVER));
+        assertThat(thirdClient.messages.isEmpty(), equalTo(true));
+        assertThat(guestSeesAfterLeave, equalTo(chat(4, 1, 0, host(), "bye")));
+        assertThat(List.of(guestAfterOwnBeforeGo, thirdAfterOwn, guestAfterOwn, hostAfterOwn),
+                everyItem(equalTo(PONG)));
+        JsonArray places = new JsonArray()
+                .add(place(0, host(), 1, 800))
+                .add(place(1, guest(), 2, 900))
+                .add(leftPlace(2, third()));
+        assertThat(hostClient.nextOfType("results"), equalTo(results(places)));
+        assertThat(guestClient.nextOfType("results"), equalTo(results(places)));
+        assertThat(hostClient.closing(), equalTo(RACE_OVER));
+        assertThat(roomMessages(host(), id), equalTo(new JsonArray()
+                .add(roomMessage(1, 2, guest(), false, "wait for me"))
+                .add(roomMessage(2, 3, third(), false, quotedText))
+                .add(roomMessage(3, 2, guest(), false, "well run"))
+                .add(roomMessage(4, 1, host(), true, "bye"))));
+    }
+
+    // Nothing refused reaches a socket: the host's next frames are the five
+    // accepted messages and then its pong. A chat message sent on the socket
+    // is an unknown type.
+    @Test
+    void shouldDeliverNoRefusedChat_whenSendMessage_givenRacing() throws Exception {
+        // given
+        String id = RaceRooms.startedRoom(List.of(host().token(), guest().token()));
+        RaceClient hostClient = connect(host(), id);
+        RaceClient guestClient = connect(guest(), id);
+        hostClient.nextOfType("go");
+        guestClient.nextOfType("go");
+
+        // when
+        int outsiderStatus = sendMessage(outsider(), id, "let me in");
+        int twoLinesStatus = sendMessage(guest(), id, "two\nlines");
+        List<Integer> statuses = new ArrayList<>();
+        for (int number = 1; number <= Rules.CHAT_MESSAGES_PER_WINDOW + 1; number++) {
+            statuses.add(sendMessage(guest(), id, "message " + number));
+        }
+        guestClient.send("{\"type\":\"chat\",\"text\":\"hello\"}");
+        JsonObject guestAnswer = guestClient.next();
+        JsonObject guestPong = nextAfterPing(guestClient);
+        List<JsonObject> hostSees = new ArrayList<>();
+        for (int i = 0; i < Rules.CHAT_MESSAGES_PER_WINDOW; i++) {
+            hostSees.add(hostClient.next());
+        }
+        hostSees.add(nextAfterPing(hostClient));
+
+        // then
+        assertThat(outsiderStatus, equalTo(404));
+        assertThat(twoLinesStatus, equalTo(400));
+        assertThat(statuses, equalTo(List.of(201, 201, 201, 201, 201, 429)));
+        assertThat(guestAnswer, equalTo(error("bad_message")));
+        assertThat(guestPong, equalTo(PONG));
+        assertThat(guestClient.closed.isDone(), equalTo(false));
+        List<JsonObject> expected = new ArrayList<>();
+        for (int number = 1; number <= Rules.CHAT_MESSAGES_PER_WINDOW; number++) {
+            expected.add(chat(number, 2, 1, guest(), "message " + number));
+        }
+        expected.add(PONG);
+        assertThat(hostSees, equalTo(expected));
+    }
+
     @Test
     void shouldResumeWithState_whenConnect_givenReconnectDuringRace() throws Exception {
         // given
@@ -433,6 +544,27 @@ class RaceSocketTest {
         assertThat(racer.nextOfType("pong"), equalTo(PONG));
     }
 
+    private static JsonObject nextAfterPing(RaceClient racer) throws InterruptedException {
+        racer.send(PING);
+        return racer.next();
+    }
+
+    private static int sendMessage(Player player, String roomId, String text) {
+        return given().cookie(TestPlayers.COOKIE, player.token())
+                .contentType(ContentType.JSON)
+                .body(new JsonObject().put("text", text).encode())
+                .when().post("/rooms/" + roomId + "/messages")
+                .then().extract().statusCode();
+    }
+
+    private static JsonArray roomMessages(Player player, String roomId) {
+        String room = given().cookie(TestPlayers.COOKIE, player.token())
+                .when().get("/rooms/" + roomId)
+                .then().statusCode(200)
+                .extract().asString();
+        return new JsonObject(room).getJsonArray("messages");
+    }
+
     private List<Boolean> readyMarks(String id) {
         return given().cookie(TestPlayers.COOKIE, host().token())
                 .when().get("/rooms/" + id)
@@ -462,6 +594,21 @@ class RaceSocketTest {
     private static JsonObject place(int slot, Player player, int place, int ticks) {
         return new JsonObject().put("slot", slot).put("nick", player.nick()).put("kind", Rules.KIND_HUMAN)
                 .put("place", place).put("ticks", ticks).put("left", false);
+    }
+
+    private static JsonObject leftPlace(int slot, Player player) {
+        return new JsonObject().put("slot", slot).put("nick", player.nick()).put("kind", Rules.KIND_HUMAN)
+                .putNull("place").putNull("ticks").put("left", true);
+    }
+
+    private static JsonObject chat(int number, int member, int slot, Player sender, String text) {
+        return new JsonObject().put("type", "chat").put("n", number).put("member", member).put("slot", slot)
+                .put("nick", sender.nick()).put("kind", Rules.KIND_HUMAN).put("guest", true).put("text", text);
+    }
+
+    private static JsonObject roomMessage(int number, int member, Player sender, boolean isYou, String text) {
+        return new JsonObject().put("n", number).put("member", member).put("nick", sender.nick())
+                .put("kind", Rules.KIND_HUMAN).put("guest", true).put("you", isYou).put("text", text);
     }
 
     private static JsonObject error(String code) {
