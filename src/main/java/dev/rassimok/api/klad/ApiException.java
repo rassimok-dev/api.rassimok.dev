@@ -16,6 +16,7 @@ class ApiException extends RuntimeException {
     static final String INVALID_CODE = "invalid_code";
     static final String TOO_MANY_ATTEMPTS = "too_many_attempts";
     static final String NICK_TAKEN = "nick_taken";
+    static final String NO_GOOGLE_LOGIN = "no_google_login";
     static final String NOT_FOUND = "not_found";
     static final String ROOM_FULL = "room_full";
     static final String NOT_IN_LOBBY = "not_in_lobby";
