@@ -30,7 +30,6 @@ public class RoomResource {
     private static final String LISTED_TRUE = "true";
     private static final String LISTED_FALSE = "false";
     private static final String FIELD_AFTER = "after";
-    private static final String FIELD_TEXT = "text";
     // Nine digits always fit an int, so no value of after can fail the conversion.
     private static final Pattern AFTER_DIGITS = Pattern.compile("[0-9]{1,9}");
 
@@ -156,7 +155,7 @@ public class RoomResource {
     public RestResponse<RoomView.Message> send(@PathParam(FIELD_ID) String id, JsonNode body,
                                                @CookieParam(Sessions.COOKIE) String token) {
         Sessions.SignedIn signedIn = sessions.require(token);
-        String text = ChatTexts.normalize(JsonFields.text(body, FIELD_TEXT));
+        String text = ChatTexts.normalize(JsonFields.text(body, Rules.FIELD_TEXT));
         if (!ChatTexts.isValid(text)) {
             throw new ApiException(Response.Status.BAD_REQUEST, ApiException.INVALID_MESSAGE);
         }

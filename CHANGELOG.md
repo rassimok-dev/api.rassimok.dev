@@ -3,6 +3,198 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-16 - Chat in a race reaches the other members' race sockets at once
+
+The user wants players to write to each other in a game during a pause,
+and to see new chat messages as pop-ups that do not get in the way of play
+(RAS-55, contract section 8). This is the API part; the game shows them in
+RAS-56. The user decided on 2026-11-15: Q11 a (the player's own pause in a
+race and the race's waits only; no pause for everyone, no chat in a solo
+game) and Q12 a (send by the REST endpoint of RAS-53, deliver over the
+race socket). Q1 to Q9 stay as answered on RAS-53: room-only, memory only,
+at most 30 messages per room, never in the database or a log line.
+
+- While a room is `starting` (before and during the countdown) or
+  `racing`, a chat message accepted by `POST /rooms/<id>/messages` also
+  goes at once to the race socket of every other member who is in the race
+  and connected at that moment:
+  `{"type":"chat","n","member","slot","nick","kind","guest","text"}`.
+  A member who has finished still gets it. It never goes to the sender's
+  socket (the 201 answer is their copy), to a member who left or counts as
+  left, to a member whose socket is gone at that moment, or to a replaced
+  socket. A refused send (400, 404, 429) reaches no socket. A send that
+  arrives once the race's end fell due is kept, but goes to no socket,
+  because the store applies the end first.
+- No replay: `state` carries no chat, and a member who connects or
+  reconnects gets no earlier message over the socket. After the race the
+  room poll lists the race's messages with the rest (the room's last 30),
+  as RAS-53 keeps them.
+- Clients send nothing new on the socket. `{"type":"chat",...}` from a
+  client is an unknown type and gets `bad_message`, and the socket stays
+  open. By the ticket's reading of the site code (not run here),
+  `receive()` in `klad/race.js` reads known types only, so the API can
+  deploy before RAS-56.
+- Code: `Room.send` stores the message as before and then relays it
+  (`Room.relay`): the frame is built once with Vert.x `JsonObject`, like
+  `pos`, and queued through each socket's `PlayerSocket.send` while
+  `RoomStore`'s lock is held, so it goes through the queued `SocketSender`
+  (the lock never waits; 8 unfinished sends close a socket with 1008
+  `not_reading`) and keeps its place among `pos`, `countdown`, `go` and
+  `results`. `Rules.FIELD_TEXT` now holds `"text"` for `RoomResource` and
+  `Room`. `RaceMessage` and `WebSocketHandshakeCheck` are unchanged. No new
+  dependency, no configuration change.
+- Contract section 8 (workspace) lists the new server message, its fields
+  and its delivery rules, and says that a client `chat` is `bad_message`.
+
+### Load, by the ticket's facts
+
+- **Traffic.** In a room of 10 each socket already receives 45 positions
+  a second (RAS-43). At the rate limit (5 per player per 10 s) the nine
+  others add 4.5 chat messages a second on average, each up to about 500
+  bytes (120 dashes or curly quotes, which the allow-list admits, are 360
+  bytes of UTF-8; 120 Cyrillic letters are 240; a Cyrillic nick up to
+  32). The limit allows the
+  5 back to back, so in the worst instant all nine others burst at once and
+  one socket gets 45 chat frames in a row on top of the positions.
+- **Slow readers.** A socket with 8 unfinished sends is closed with 1008
+  `not_reading` (`SocketSender`), and the game does not reconnect after
+  1008. More traffic brings a phone on a slow link closer to that. The
+  measurement below sent the bursts, not an even spread, as the harder
+  case for this rule.
+- **Memory.** Only races without chat were measured: a race of 4 (RAS-32,
+  109.3 of 256 MiB) and races of 10 (RAS-43, about 147). A race with chat
+  is measured below.
+- **Requests.** Each sent message is one Workers request and one session
+  read from Neon, as in the lobby (RAS-53); receiving costs nothing extra.
+- **Abuse.** Only the race's own members reach the sockets: a join is
+  refused outside `lobby` (409 `not_in_lobby`), so the fresh guests taking
+  turns in a free place that RAS-53 noted for the lobby cannot feed a
+  race. A race of 10 gets at most 50 messages per 10 s, each to at most 9
+  sockets. A member who floods is held at 5 per 10 s like everyone, and the
+  others' game shows what arrives; hiding a sender is RAS-54's "hide this
+  player" by member number, on the device.
+- **Privacy.** The text now also leaves the API in socket frames, to the
+  members who could read it in the room poll anyway. It still goes into no
+  log line (`ChatLogTest` covers the socket path now).
+
+- **Measured on the native binary** of this branch, built after its last
+  change to `src/main` (the binary the 287 native tests then ran against),
+  set up as for the RAS-32 and RAS-43 tables: `--memory 256m
+  --memory-swap 256m --cpus 1`, a throwaway `postgres:18`, a raw-socket
+  client in a second container that sets up the room over REST, each row
+  on a fresh server container. `memory.peak`, and `anon` sampled every
+  second, come from the container's cgroup; sizes in MiB. Each row is one
+  full race of 10 (the room maximum): 120 s of positions at 5 a second,
+  every member sending one `pos` in the same instant as all the others,
+  with a `ping` every 20 s, as for RAS-43; then the members finish from
+  slot 9 down. On top, every member sends chat by REST on threads of its
+  own, at the rate limit, each text 120 Cyrillic letters (the longest in
+  characters; 240 bytes, so the burst bytes below are about 1.35 times
+  under the 360-byte maximum of 120 dashes or curly quotes).
+  In the burst rows all 10 members send 5 messages back to back in the
+  same instant, every 10.5 s; in the spread row each member sends one
+  every 2.1 s, the members staggered. Idle: 97.7 to 103.4 peak, 21.2 to
+  23.2 `anon`.
+
+  | Row | Peak | `anon` max | What happened |
+  |---|---|---|---|
+  | one race of 10, positions at 5 a second, chat bursts at the rate limit, run 1 | 153.6 | 67.7 | 600 of 600 chat messages accepted (no 429), each delivered to all 9 others once (5,400 frames), none echoed, to only some or twice; 6,000 of 6,000 positions relayed to all 9 others (54,000 frames), none echoed; 60 of 60 pongs; `/status` 122 of 122 times 200 during the race, at most 10.5 ms; no socket ended early, none with `not_reading`; the slowest send 16.1 ms; 10 places in finish order, 10 times 1000 `race_over`; the room back in `lobby`, nobody ready, its poll listing the last 30 messages (up to `n` 600); 6.7 s of CPU |
+  | the same, run 2 | 147.3 | 67.6 | the same counts; `/status` at most 8.0 ms; the slowest send 13.8 ms; 6.7 s of CPU |
+  | one race of 10, positions at 5 a second, chat spread evenly at the rate limit | 144.5 | 64.7 | 565 of 565 accepted (no 429), each delivered to all 9 others once (5,085 frames), none echoed; positions, pongs, results and closes as above; `/status` 122 of 122, at most 7.7 ms; no socket ended early; the slowest send 27.6 ms; 7.5 s of CPU |
+
+  - Before measuring, a row counted as not fitting on any of these, as for
+    RAS-43: an OOM kill or restart, a peak above 80 % of the limit (204.8
+    MiB), any `not_reading` or other early close, any chat message or
+    position that reached only some members, was echoed or came twice, or
+    a `/status` that was not 200 or took over 1 s. Every row fits.
+  - Against the RAS-43 race of 10 without chat (146.6 peak, 64.6 `anon`
+    max, 6.0 s of CPU), the chat rows peak 144.5 to 153.6 and `anon`
+    stays at 64.7 to 67.7, within the spread between two runs; chat adds
+    about 0.7 to 1.5 s of CPU over the 2 minutes. `anon` levels off
+    within 30 s and stays flat, the room holding its 30 messages.
+  - Nothing was logged at WARN or above, no log line held the chat
+    letters (run 1 checked the raw letters; the other two rows also the
+    JSON escapes, each server logging 15 lines in all), and no socket was
+    closed with `not_reading`. The clients read as fast as the
+    frames came; a slow phone link was not measured.
+
+### Tests
+
+- Unit, fake clock: `RoomStoreRaceTest` (+14). The RAS-53 case that
+  pinned "a send in `racing` sends nothing over the race sockets" now pins
+  the opposite: the message is kept, the other socket gets the `chat`
+  frame whole, the sender's gets nothing. New: in `starting` with one
+  member not yet connected, only the connected other gets it, and the late
+  member's connect brings `state` and `countdown` but no replay (the poll
+  has the message); a send during the countdown lands between `countdown`
+  and `go`; a finished member gets the others' chat and its own reaches the
+  others; a member who left gets none after the leave (the recording
+  socket would show a send after its close); a member whose socket is gone
+  gets none, and none on reconnect; after a replace only the new socket
+  gets it; the sixth message within 10 s (429) and a non-member's send
+  (404) reach no socket; `pos`, chat, `pos` and then `results` arrive in
+  that order and a chat after the results reaches no socket, while the
+  poll lists all three; a send at the instant the 4-minute cap fell due is
+  kept and the sockets get only `results`; in a race of 10 each socket gets
+  the 9 others' messages in order, never its own; an agent account renamed
+  during the race sends with `kind` agent, `guest` false and the new nick
+  (as the poll shows it), and a text with quotes, a backslash and Cyrillic
+  letters arrives intact. `RaceMessageTest` (+2): `{"type":"chat"}` and
+  `{"type":"chat","text":"hello"}` from a client parse as bad.
+- `@QuarkusTest`, real sockets: `RaceSocketTest` (+2). A whole race of
+  three: a chat before `go` (the third not yet connected), one while
+  racing, one to a member who has finished, the third leaving by REST
+  (1000 `race_over`, nothing more on its socket), one after that leave,
+  then the results with the third as left, and the host's room poll
+  listing all four messages whole. A ping after each send gets the pong
+  as the very next frame, so an echo would show. A second race: a
+  non-member's send is 404, a two-line text 400, five sends 201 and the
+  sixth 429; the other member's next frames are exactly the five messages
+  and then its pong; a client `{"type":"chat","text":"hello"}` gets
+  `bad_message` and the socket stays open.
+- `SocketGuardsTest` (+1): the whole cap (two rooms of 10) is opened with
+  clients that read nothing, every member sends 5 messages of 120
+  Cyrillic letters (the sixth is 429), the clients go, and the whole cap
+  opens again.
+  `SocketRoute` gets `sendUnpromptedAtLimit` for this, so a later socket
+  route has to say what its own traffic at its limits is; `RaceRoute`
+  counts `chat` among the messages the route sends on its own.
+- `ChatLogTest` (+1, JVM only, production JSON log format): a marker text
+  sent during a race reaches the other member's socket in a `chat` frame,
+  the same marker in a client `chat` frame gets `bad_message`, and no log
+  line or record holds it.
+- Native: `RaceSocketIT` and `SocketGuardsIT` run the new cases against
+  the binary.
+- Runs: `./mvnw test` 1,028 JVM tests (1,008 before), and in the Mandrel
+  Linux container 287 native tests (284 before), all passing.
+
+### Decisions worth not relitigating
+
+- **The frame carries the stored message's fields**, so for one `n` the
+  socket and the room poll agree: the nick, kind and guest mark at the time
+  of sending, which can differ from the race's `nick` in `state` and `pos`
+  after a rename during the race. `slot` comes from the sender's racer, so
+  the game can tie the message to a runner. There is no `you`: the frame
+  never goes to its sender.
+- **Only the sockets connected at that moment.** A member whose socket is
+  gone, or who connects later, reads the message in the room poll after
+  the race; `state` gets no chat history, so a reconnect stays as small as
+  before. RAS-56 has to read the poll after the race if it wants what was
+  missed.
+- **Relayed in `Room`, under the lock**, as `leave` reaches the sockets
+  through `remove`: the room queues the sends, and each socket writes on
+  its own event loop after the lock is released. A REST request now queues
+  up to 9 socket sends; that is queueing, not I/O, as for a `pos`.
+- **The test that pinned "nothing over the socket" was rewritten, not
+  kept**: RAS-53 wrote it to hold the line until this ticket.
+- **Measured with bursts.** The rate limit lets a member send 5 at once,
+  and `not_reading` trips on bursts rather than on averages, so every
+  member sent 5 at the same instant, every 10.5 s; an even spread was run
+  once for comparison. 10.5 s rather than 10 leaves a margin, so a burst
+  that the server takes a few milliseconds to accept never meets the edge
+  of the sliding window (no 429 from timing), and the 120 s still hold 12
+  bursts, as a 10 s period would.
+
 ## 2026-11-15 (sixth) - Guests nobody can reach are deleted about 90 days after their last visit, and expired sessions
 
 The user wants klad to follow the GDPR as fully as possible (2026-11-15)

@@ -41,4 +41,8 @@ interface SocketRoute {
 
     // A message the route sends on its own, not as an answer.
     boolean isUnprompted(String message);
+
+    // Makes the route send the seats' sockets as much on its own as its
+    // limits allow at once, through whatever reaches them from outside.
+    void sendUnpromptedAtLimit(List<Seat> seats);
 }

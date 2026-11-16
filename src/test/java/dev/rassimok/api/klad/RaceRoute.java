@@ -1,5 +1,7 @@
 package dev.rassimok.api.klad;
 
+import io.restassured.http.ContentType;
+import io.restassured.response.ValidatableResponse;
 import io.vertx.core.json.JsonObject;
 
 import java.util.ArrayList;
@@ -24,7 +26,9 @@ final class RaceRoute implements SocketRoute {
     // replaced by a later one.
     private static final int PAIRS = 8;
     private static final int GROUP_PLAYERS = 2 * Rules.SOCKETS_OPEN_MAX;
-    private static final Set<String> UNPROMPTED_TYPES = Set.of("state", "countdown", "go", "pos", "results");
+    private static final Set<String> UNPROMPTED_TYPES = Set.of("state", "countdown", "go", "pos", "results", "chat");
+    // 120 Cyrillic letters of two bytes each: the longest text in characters.
+    private static final String LONGEST_CHAT_BODY = "{\"text\":\"" + "\u0416".repeat(Rules.CHAT_TEXT_LENGTH_MAX) + "\"}";
 
     private final List<String> pairTokens = new ArrayList<>();
     private final List<String> groupTokens = new ArrayList<>();
@@ -114,6 +118,19 @@ final class RaceRoute implements SocketRoute {
         return UNPROMPTED_TYPES.contains(new JsonObject(message).getString("type"));
     }
 
+    // Every member sends a 120-letter chat text as often as the rate limit
+    // allows, so each socket gets the others' messages; one more is refused.
+    @Override
+    public void sendUnpromptedAtLimit(List<Seat> seats) {
+        for (Seat seat : seats) {
+            String messagesPath = "/rooms/" + seat.path().substring(RaceRooms.RACE_PATH.length()) + "/messages";
+            for (int i = 0; i < Rules.CHAT_MESSAGES_PER_WINDOW; i++) {
+                sendChat(seat.token(), messagesPath).statusCode(201);
+            }
+            sendChat(seat.token(), messagesPath).statusCode(429);
+        }
+    }
+
     @Override
     public String toString() {
         return "race";
@@ -140,6 +157,11 @@ final class RaceRoute implements SocketRoute {
             nextPair = 0;
             probeToken = guests(1).getFirst();
         }
+    }
+
+    private static ValidatableResponse sendChat(String token, String messagesPath) {
+        return given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON).body(LONGEST_CHAT_BODY)
+                .when().post(messagesPath).then();
     }
 
     private static List<String> guests(int count) {

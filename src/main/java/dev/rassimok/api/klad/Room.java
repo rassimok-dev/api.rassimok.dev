@@ -40,6 +40,7 @@ final class Room {
     private static final String TYPE_RESULTS = "results";
     private static final String TYPE_PONG = "pong";
     private static final String TYPE_ERROR = "error";
+    private static final String TYPE_CHAT = "chat";
     private static final String FIELD_STATE = "state";
     private static final String FIELD_PLAYERS = "players";
     private static final String FIELD_POSITIONS = "positions";
@@ -54,6 +55,9 @@ final class Room {
     private static final String FIELD_PLACE = "place";
     private static final String FIELD_LEFT = "left";
     private static final String FIELD_ERROR = "error";
+    private static final String FIELD_NUMBER = "n";
+    private static final String FIELD_MEMBER = "member";
+    private static final String FIELD_GUEST = "guest";
 
     static final class Member {
 
@@ -270,6 +274,7 @@ final class Room {
         if (Rules.CHAT_MESSAGES_KEPT < chat.size()) {
             chat.removeFirst();
         }
+        relay(message);
         return message.seenBy(sender);
     }
 
@@ -430,6 +435,26 @@ final class Room {
             String relayed = positionJson(racer).put(RaceMessage.FIELD_TYPE, RaceMessage.TYPE_POS)
                     .put(FIELD_NICK, racer.nick).encode();
             inRace().filter(other -> other != racer && other.isConnected())
+                    .forEach(other -> other.socket.send(relayed));
+        }
+    }
+
+    // In a race a chat message also goes at once to the others' sockets, a
+    // finished member's too; the sender has the answer to the send. It holds
+    // what the room poll shows for it, plus the sender's slot.
+    private void relay(ChatMessage message) {
+        Racer sender = racer(message.senderId());
+        if (null != sender) {
+            String relayed = message(TYPE_CHAT)
+                    .put(FIELD_NUMBER, message.n())
+                    .put(FIELD_MEMBER, message.member())
+                    .put(FIELD_SLOT, sender.slot)
+                    .put(FIELD_NICK, message.nick())
+                    .put(Rules.FIELD_KIND, message.kind())
+                    .put(FIELD_GUEST, message.isGuest())
+                    .put(Rules.FIELD_TEXT, message.text())
+                    .encode();
+            inRace().filter(other -> other != sender && other.isConnected())
                     .forEach(other -> other.socket.send(relayed));
         }
     }
