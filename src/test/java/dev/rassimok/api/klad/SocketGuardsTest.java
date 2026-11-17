@@ -118,7 +118,8 @@ class SocketGuardsTest {
     // Long enough for a second handshake on the same connection to get
     // through its session lookup before the client closes.
     private static final long SECOND_HANDSHAKE_MILLIS = 500;
-    // Deep enough to overflow an event loop's stack if each one were answered.
+    // Deep enough to overflow a JVM event loop's stack on some platforms
+    // if each one were answered; the catch rate varies (see CHANGELOG).
     private static final int QUEUED_HANDSHAKES = 8000;
     private static final int QUEUE_ROUNDS = 5;
     // For the server to read the whole queue before the reset, and to see

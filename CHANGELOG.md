@@ -33,8 +33,9 @@ back changes for a client that leaves during its lookup.
   each). `upgrade` now gives a handshake on a connection that has already
   closed no slot, no lookup and no answer, not even an `end()`. Ending a
   response makes Vert.x route the next queued request inside that call,
-  so with no `end()` nothing behind it is routed, and the queue goes with
-  the connection. The first version of this change answered such a
+  so with no `end()` no handshake behind it is routed, and the queue goes
+  with the connection (a non-upgrade request queued behind it still
+  reaches the router before this check; see the follow-up below). The first version of this change answered such a
   handshake 503 instead (`takeSlot` reported no slot on a closed
   connection). The 2026-11-17 security review showed the cost: each 503
   routed the next handshake inside its own `end()`, one stack level per
@@ -46,10 +47,13 @@ back changes for a client that leaves during its lookup.
   frame sizes, not from the code. A 503 could not reach a client that
   has gone anyway. `takeSlot` still reports no slot on a closed
   connection, but `upgrade` now stops such a connection before it.
-  The refusals on the event loop (400, 426, 503, 403) of handshakes
-  pipelined on a connection that stays open still route the next one
-  inside their `end()` and nest the same way; main did the same before
-  this change, and it is left for a follow-up.
+  Any answer given on the event loop to a pipelined request still routes
+  the next one inside its `end()` and nests the same way: the refusals
+  (400, 426, 503, 403) of handshakes on a connection that stays open, and
+  non-upgrade requests (the router's 404) queued behind an abandoned
+  lookup, also on a closed connection (round 2 review: a
+  `StackOverflowError` on the JVM at 3 rounds of 8,000, no slot lost).
+  Main did the same before this change; it is left for a follow-up.
 - **No "Result is already complete" ERROR.** After `toWebSocket()` the
   check replaces the request's exception handler, which Vert.x 4.5 had set
   to fail the upgrade, with one that does nothing. A close in the one
@@ -182,8 +186,11 @@ back changes for a client that leaves during its lookup.
   not opened); with the close listener giving the slot back during a
   lookup, the slow-lookup test got no answer. Without the closed check in
   `upgrade`, the deep-queue test lost a slot in 2 of 3 runs (a seat got
-  503 until the deadline, nothing logged); on the JVM only, as
-  the native binary lost none in the review. Without that check and with
+  503 until the deadline, nothing logged). That catch depends on the
+  platform: 2 of 3 on macOS (arm64), 0 of 3 in a Linux arm64 container
+  and 1 of 3 there with `-Xss1m` (round 2 review); the x64 CI runner is
+  not measured, and the native binary lost none. The test proves the
+  slots come back, not that a regression is always seen. Without that check and with
   the old `takeSlot` return as well, the queued-handshake test saw 20
   lookups waiting; with the `takeSlot` check alone (the first version) it
   passed.
