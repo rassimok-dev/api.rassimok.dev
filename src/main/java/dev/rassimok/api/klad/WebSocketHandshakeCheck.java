@@ -18,6 +18,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
@@ -51,6 +52,9 @@ public class WebSocketHandshakeCheck {
     // connection closes, so a kept-alive connection gets one close listener,
     // not one per handshake.
     private final Map<HttpConnection, Boolean> slotHolders = new ConcurrentHashMap<>();
+    // Connections whose session lookup runs. A close leaves their slot to the
+    // lookup's end, so a client that leaves cannot start lookups without limit.
+    private final Set<HttpConnection> lookingUp = ConcurrentHashMap.newKeySet();
 
     @Inject
     WebSocketHandshakeCheck(@ConfigProperty(name = "klad.websocket.allowed-origin") String allowedOrigin,
@@ -99,6 +103,7 @@ public class WebSocketHandshakeCheck {
             // for a later event-loop task: inside this read it would pass the
             // bytes after the request to the WebSocket decoder, losing the 101.
             Context requestContext = Vertx.currentContext();
+            lookingUp.add(connection);
             requestContext.executeBlocking(() -> signedInPlayer.apply(token), false)
                     .onComplete(lookup -> requestContext.runOnContext(
                             ignored -> afterLookup(context, connection, lookup, endpoint)));
@@ -120,9 +125,11 @@ public class WebSocketHandshakeCheck {
         return headers.contains(HttpHeaders.TRANSFER_ENCODING) || (null != contentLength && !"0".equals(contentLength));
     }
 
-    // A slot belongs to a connection and comes back once: at a refusal, or
-    // when the socket or the connection closes. The connection's close also
-    // covers any path that ends in neither, such as an upgrade that never ends.
+    // A slot belongs to a connection and comes back once: at a refusal, when
+    // the socket or the connection closes, or, for a connection that closed
+    // during its session lookup, when the lookup returns. The connection's
+    // close also covers any path that ends in no refusal and no socket, such
+    // as an upgrade that never ends.
     private boolean takeSlot(HttpConnection connection) {
         boolean hasSlot = openSockets.tryOpen();
         if (hasSlot && null == slotHolders.put(connection, true)) {
@@ -130,15 +137,29 @@ public class WebSocketHandshakeCheck {
             // takes one, and Quarkus sets it when the connections are limited.
             ConnectionBase tcpConnection = (ConnectionBase) connection;
             tcpConnection.closeFuture().onComplete(ignored -> {
-                giveBackSlot(connection);
-                slotHolders.remove(connection);
+                if (!lookingUp.contains(connection)) {
+                    forget(connection);
+                }
             });
         }
-        return hasSlot;
+        // On a connection that has already closed, the listener above ran at
+        // once and gave the slot back. Handshakes sent behind one another are
+        // routed there too, and none of them may start a lookup.
+        return hasSlot && holdsSlot(connection);
     }
 
     private boolean holdsSlot(HttpConnection connection) {
         return Boolean.TRUE.equals(slotHolders.get(connection));
+    }
+
+    private void forget(HttpConnection connection) {
+        giveBackSlot(connection);
+        slotHolders.remove(connection);
+    }
+
+    private static boolean hasClosed(HttpConnection connection) {
+        ConnectionBase tcpConnection = (ConnectionBase) connection;
+        return tcpConnection.closeFuture().isComplete();
     }
 
     // Called before a refusal ends its response: that routes the request
@@ -150,12 +171,12 @@ public class WebSocketHandshakeCheck {
     }
 
     // The upgrade of a gone client would throw and log an error, so it is
-    // refused first. The handshake runs one event-loop task after
-    // toWebSocket(); a close in between fails the upgrade.
+    // refused first.
     private void afterLookup(RoutingContext context, HttpConnection connection, AsyncResult<LobbyPlayer> lookup,
                              SocketEndpoint endpoint) {
-        if (context.response().closed()) {
-            giveBackSlot(connection);
+        lookingUp.remove(connection);
+        if (hasClosed(connection)) {
+            forget(connection);
             refuse(context, CLIENT_GONE);
         } else if (lookup.failed()) {
             giveBackSlot(connection);
@@ -171,11 +192,16 @@ public class WebSocketHandshakeCheck {
                 refuse(context, refusalStatus);
             } else {
                 context.request().toWebSocket().onComplete(upgraded -> {
-                    if (upgraded.succeeded()) {
+                    if (upgraded.succeeded() && !hasClosed(connection)) {
                         open(upgraded.result(), connection, player, endpoint);
                     } else {
                         giveBackSlot(connection);
                     }
+                });
+                // On a close before the handshake, Vert.x 4.5 fails the upgrade
+                // through this handler, then completes it anyway and logs "Result
+                // is already complete". The close gives the slot back instead.
+                context.request().exceptionHandler(ignored -> {
                 });
             }
         }

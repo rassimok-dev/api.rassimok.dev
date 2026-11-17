@@ -3,6 +3,201 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-17 - Socket guards: session lookups held to the cap, no upgrade-race ERROR, the per-player gap accepted
+
+The RAS-29 round-6 review left three socket items as minors, and RAS-32
+deferred them (RAS-37). The user decided on 2026-11-17: 1 a) hold the
+slot until the session lookup returns, 2 a) a no-op request exception
+handler after `toWebSocket()`, tested with concurrent resets, 3 b) accept
+the per-player cap gap and write it down, with no contract change. The
+RAS-29 invariant holds: a slot belongs to its TCP connection and comes
+back exactly once (`giveBackSlot` is unchanged); only the moment it comes
+back changes for a client that leaves during its lookup.
+
+- **At most 20 session lookups at once.** Until now a client that left
+  during its lookup got its slot back at its connection's close while the
+  lookup still ran, so the cap bounded the lookups only of clients that
+  stayed. The sixth RAS-29 review killed a 256 MiB native instance for
+  lack of memory in about 15 s with about 4,200 such handshakes a second.
+  Now `WebSocketHandshakeCheck` marks a connection while its lookup runs
+  (`lookingUp`); its close then leaves the slot to the lookup's end, and
+  `afterLookup` sees the closed connection, gives the slot back and refuses
+  with 499 as before. Open sockets and lookups in flight share the 20
+  slots, and every further handshake gets 503 on the event loop, with no
+  worker thread and no database read. For a client that stays nothing
+  changes: its slot was already taken before the lookup.
+- **Handshakes queued behind an abandoned one start no lookup.** Vert.x
+  routes a request queued behind another on the same connection even
+  after the connection has closed (the sixth review counted 540 session
+  reads for 5 connections of 100 queued handshakes each). `takeSlot` now
+  reports no slot when the connection had already closed: its close
+  listener runs at once and gives the slot back. So such a handshake gets
+  503 and no lookup, instead of a lookup outside the cap.
+- **No "Result is already complete" ERROR.** After `toWebSocket()` the
+  check replaces the request's exception handler, which Vert.x 4.5 had set
+  to fail the upgrade, with one that does nothing. A close in the one
+  event-loop task before the handshake used to fail the upgrade; Vert.x
+  then completed it anyway and Quarkus logged `IllegalStateException:
+  Result is already complete` with a stack trace (about 3 in 100
+  handshakes abandoned in a burst, sixth review; no slot was lost). Now
+  the upgrade completes on the closed connection, and the check does not
+  open it: Vert.x never calls the close handler of a socket made after its
+  connection closed, so an opened one would count as connected in the race
+  with no `onClose` to come, and could replace a live socket of the same
+  member. The connection's close gives the slot back, as for every upgrade
+  that ends without a socket. `hasClosed` reads the connection's close
+  future, the signal the close listener hangs on, so both always agree.
+- **The per-player cap stays as it is (accepted, not built).** One cookie
+  can hold several of the 20 slots while its replaced sockets close. Since
+  RAS-32 every server-started close, `replaced` included, drops the
+  connection after 1 s (`Rules.SOCKET_CLOSE_GRACE`) whatever the client
+  does, so a member who reconnects in a loop holds one slot for the live
+  socket plus about one for each reconnect in the last second. Only a
+  scripted client reconnects that fast (the game backs off, at most 8
+  reconnects a race), and every reconnect is a handshake with a session
+  lookup inside the cap. Refusing a member's handshake while the old
+  socket closes would change contract section 8 ("a member connecting
+  again replaces the old socket"), so it is not done.
+- These replace four statements of earlier entries, which stay as they
+  were written: in 2026-11-13 (seventh), "The cap bounds the session
+  lookups only while their clients stay connected", "Session lookups in
+  flight are not bounded by the cap" and "The line comes from inside
+  Vert.x and cannot be removed from the endpoint"; in 2026-11-13 (ninth),
+  "Round-6 review items, deferred as follow-ups".
+- Corrected in place, dated: the "Slow readers" lines of 2026-11-16 (RAS-55)
+  and 2026-11-15 (later still, RAS-43) said the game does not reconnect
+  after a `not_reading` 1008. The client sees a reset and reconnects
+  (measured 2026-11-16). The code path is unchanged.
+- No new dependency; `application.properties`, `deploy.yml` and the
+  contract are unchanged.
+
+- **Measured on the native binary** of this branch (sha256 `bf4e2af9...`,
+  built from the final `src/main`, the binary the 302 native tests ran
+  against), and for comparison on a native binary of main's socket code
+  (`4427cbb6...`, found in the checkout's `target/`, dated 2026-11-16
+  20:30, its source tree not recorded; its strings hold RAS-39's
+  `klad_oauth`, so it was built after RAS-72, which last changed
+  `WebSocketHandshakeCheck`, `OpenSockets`, `Sessions` and `SocketSender`
+  on main). Local Docker only, never production: the server at `--memory
+  256m --memory-swap 256m --cpus 1`, a throwaway `postgres:18` with
+  `log_statement=all`, both fresh for every row, and raw-socket clients in
+  containers of their own. The flood is the sixth review's: the allowed
+  Origin, an unknown cookie, the connection closed right after the write.
+  Sizes in MiB; `memory.peak` and `anon` (sampled every second) from the
+  server's cgroup; idle about 97 to 103 peak and 20 to 25 `anon`. After
+  each row in which the server survived, 25 handshakes at once got 20
+  times 101 and 5 times 503; no row logged anything at WARN or above. With
+  an unknown cookie no flood handshake reaches `toWebSocket()`, so these
+  rows say nothing about the "Result is already complete" ERROR; that is
+  shown on the JVM only (Tests).
+
+  | Row | Main's binary | This branch |
+  |---|---|---|
+  | about 4,200 a second for 30 s (six clients of 700 each), Postgres held to 0.1 CPU so that lookups are slow, 2 runs | killed for lack of memory both times, 5 to 7 s into the flood; `anon` at most 166.3 and 105.4; about 3,700 lookups | survived both times; peak 140.8 and 141.5, `anon` at most 60.4 and 61.0 and back to 18 after; 19,800 and 18,600 lookups, the rest refused with 503; `/status` at most 3 ms |
+  | the same with Postgres not held, 1 run | survived; peak 138.4, `anon` at most 58.9; 121,300 lookups for 122,400 handshakes | survived; peak 139.9, `anon` at most 59.5; 120,600 lookups for 123,700 handshakes |
+  | as fast as 4 or 8 client threads go (7,100 to 8,800 a second), Postgres not held, 3 runs | survived 3 of 3; peak 254.2 to the limit (page cache reclaimed), `anon` at most 126.0 to 143.9; 7,000 to 8,000 lookups | survived 3 of 3; peak 238.5 to the limit, `anon` at most 106.6 to 155.9; 7,000 to 8,700 lookups |
+  | as fast as 16 client threads go (7,600 to 8,800 a second where the client finished and counted), 2 runs | killed 2 of 2 | killed 1 of 2; the other survived at the limit, `anon` at most 124.7 |
+  | `GET /status`, which reads no database, as fast as 8 client threads go (about 5,100 a second, counted on this branch's run), 1 run | killed | killed, 36 s after the flood ended |
+
+  - The first row is the case this change is for, and it reproduces the
+    sixth review's kill: with slow lookups, main's code queued one for
+    every abandoned handshake and died within seconds. With the hold, at
+    most 20 ran, and memory stayed far below the limit.
+  - With fast lookups nothing queues, and both binaries behave alike. In
+    the unpaced rows the server saturated on connections before lookups
+    could queue: both binaries ran about the same number, so those rows
+    show no benefit of the hold, and no cost.
+  - Above about 7,000 abandoned connections a second a 256 MiB instance
+    can die on either binary, and a flood of `GET /status` kills it at
+    about 5,100 a second without any database. That limit belongs to the
+    instance, REST included, not to the socket guards; its cause was not
+    traced. It is an open item for a decision (REQ-001), not part of this
+    ticket.
+  - One client container held to 4,200 a second ran out of local ports
+    after about 28,000 connections (each closed connection waits 60 s in
+    TIME_WAIT), so the paced rows use six. At the run.app URL the
+    container sees Google's front end, not the client, so local connection
+    churn overstates what reaches it (assumed, as in RAS-29).
+
+### Tests
+
+- `SocketGuardsTest` (+3, so `SocketGuardsIT` runs them natively; each
+  ends by opening the whole cap at once):
+  - `shouldRefuseHandshake_whenConnect_givenCapOfHandshakesAbandonedDuringSlowLookup`:
+    the test's own transaction locks the `session` table, so every lookup
+    waits; 20 handshakes are sent and closed, all 20 lookups are seen
+    waiting for the lock (`pg_stat_activity`), and a 21st handshake kept
+    open reads 503 at once. On the old code it got a slot and waited.
+  - `shouldStartNoLookup_whenConnect_givenHandshakeQueuedBehindOneAbandonedDuringLookup`:
+    20 connections each send a handshake with an unknown cookie and,
+    behind it in the same write, one with a valid cookie, then close. The
+    first waits for the locked `session` table; once that is free, the
+    queued one would read the session and then wait for the also locked
+    `player` table. No statement waits there afterwards; with the old
+    `takeSlot` return, 20 did.
+  - `shouldOpenSocketsUpToCap_whenConnect_givenHandshakesResetAsLookupsReturn`:
+    20 handshakes wait for the locked `session` table together; once it is
+    free, the clients reset one after another, 1 ms apart, so the resets
+    land before, during and after the upgrades.
+- `AbandonedHandshakeLogTest` (+1, JVM only, it reads the log):
+  `shouldLogNoWarningAndLeaveNoMemberConnected_whenConnect_givenHandshakesResetAsLookupsReturnOnBusyServer`
+  runs the same resets 3 times while a test verticle keeps every event
+  loop busy: twice as many instances as processors (Quarkus runs at most
+  one event loop per processor, and at least 2), each with 100 tasks that
+  spin for 20 microseconds and queue themselves again. Vert.x reads the
+  network only between batches of tasks, so on an idle test server a
+  reset almost never lands in the gap before the handshake: 2,000 to
+  6,000 resets from 20 threads without the busy loops logged the ERROR 0
+  to 7 times on this Mac. With them: no WARN or ERROR line, a new socket
+  of each room sees no other member connected, and 20 fresh seats open at
+  once.
+- Checked by mutation, each change on its own (JVM): without the no-op
+  handler the log test failed every run (4 of 4, 22 to 40 ERROR lines a
+  run); without the closed-connection check in the upgrade callback it
+  failed every run (3 of 3), with members shown connected (with the check,
+  16 to 17 upgrades in 5 rounds completed on a closed connection and were
+  not opened); with the close listener giving the slot back during a
+  lookup, the slow-lookup test got no answer; with the old `takeSlot`
+  return, the queued-handshake test saw 20 lookups waiting.
+- Runs: `./mvnw test` 1,151 JVM tests (1,147 before), and in the
+  Mandrel Linux container 302 native tests (299 before), all passing.
+
+### Decisions worth not relitigating
+
+- **The slot is held, not a second semaphore.** The sixth review offered
+  both. Holding the slot (the user's choice) keeps one count for sockets
+  and lookups, so 20 is still the most the instance does for sockets at
+  once, and no new state is needed beyond the set of connections looking
+  up.
+- **A lookup that never returns keeps its slot.** The old backstop (the
+  connection's close) could not leak; the hold gives that up for lookups.
+  A lookup waits at most Agroal's acquisition timeout for a pooled
+  connection (5 s, the quarkus-agroal 3.39.3 default, not set here), but a
+  query on a database connection that hangs is not bounded in the app
+  (pgjdbc 42.7.13 has no socket timeout by default). The database hanging
+  stops REST as well (not tested).
+- **The no-op handler depends on the request wrappers passing it on.**
+  Vert.x Web's and Quarkus's own wrappers in front of the request today
+  hand `exceptionHandler` to Vert.x's request (read in vertx-web 4.5.33 and
+  quarkus-vertx-http 3.39.3). `QuarkusRequestWrapper` keeps it to itself;
+  Quarkus puts that wrapper in front only with the HTTP access log, a
+  same-site cookie setting or a shutdown timeout (`VertxHttpRecorder`),
+  none of which is set, and in dev mode for the Dev UI's access log, so
+  `quarkus:dev` can still log the ERROR. If one is set later, the ERROR
+  comes back, and `AbandonedHandshakeLogTest` fails.
+- **Upstream.** Vert.x's `Http1xServerConnection.createWebSocket` should
+  complete the upgrade with `tryComplete`; 4.5.35 still calls `complete`
+  (sixth review). Not reported from here.
+- **Busy event loops in a test.** The race is between two event-loop tasks
+  of one connection and needs the network read in between, which a
+  black-box client cannot force. Tasks that keep the server's event loops
+  busy, from a JVM-only test, make it happen every run without a test hook
+  in the production code. RAS-72 made the opposite call because its race
+  was inside one method call.
+- **Through the site's proxy** an abandoned handshake costs a Workers
+  request, as before. The lookups behind the cap are what a raw client at
+  the run.app URL could pile up.
+
 ## 2026-11-16 (later) - Sign in with Google, merged switched off
 
 Players can open or create their klad account with Google instead of
@@ -244,10 +439,14 @@ at most 30 messages per room, never in the database or a log line.
   5 back to back, so in the worst instant all nine others burst at once and
   one socket gets 45 chat frames in a row on top of the positions.
 - **Slow readers.** A socket with 8 unfinished sends is closed with 1008
-  `not_reading` (`SocketSender`), and the game does not reconnect after
-  1008. More traffic brings a phone on a slow link closer to that. The
-  measurement below sent the bursts, not an even spread, as the harder
-  case for this rule.
+  `not_reading` (`SocketSender`). Corrected 2026-11-17 (RAS-37): this line
+  said the game does not reconnect after 1008, but the client never gets
+  that 1008. `SocketSender` queues it behind the sends the client has not
+  read and drops the connection at once, so the client sees a reset (1006
+  in a browser) and the game reconnects (measured 2026-11-16, workspace
+  `docs/plans/2026-11-16-ras-55-throttled-reader.md`). More traffic brings
+  a phone on a slow link closer to that. The measurement below sent the
+  bursts, not an even spread, as the harder case for this rule.
 - **Memory.** Only races without chat were measured: a race of 4 (RAS-32,
   109.3 of 256 MiB) and races of 10 (RAS-43, about 147). A race with chat
   is measured below.
@@ -977,16 +1176,17 @@ colours), or a fifth runner would have been invisible to the others.
   limit of 10 a second. Each socket receives 45 a second (90 at the limit)
   instead of 15.
 - **Slow readers.** A socket with 8 unfinished sends is closed with 1008
-  `not_reading` (`SocketSender`), and the game does not reconnect after
-  1008. A send counts as unfinished until Netty has written it to the
-  socket. By the Vert.x 4.5.33 code (read, not traced at runtime), a send
-  queued to the socket's event loop is written and flushed at once, outside
-  any read, and its completion runs inline on that loop while the kernel
-  takes the bytes, so 9 relays queued back to back do not pile up for a
-  client that reads. Measured below: no socket closed at about 82 messages
-  a second each (all members sending at 10 a second in the same instant,
-  less what the limit dropped). A phone on a slow link was not measured;
-  it now gets three times the traffic.
+  `not_reading` (`SocketSender`). Corrected 2026-11-17 (RAS-37): the
+  client sees a reset, not the 1008, and the game reconnects (see the
+  RAS-55 entry of 2026-11-16). A send counts as unfinished until Netty has
+  written it to the socket. By the Vert.x 4.5.33 code (read, not traced at
+  runtime), a send queued to the socket's event loop is written and
+  flushed at once, outside any read, and its completion runs inline on
+  that loop while the kernel takes the bytes, so 9 relays queued back to
+  back do not pile up for a client that reads. Measured below: no socket
+  closed at about 82 messages a second each (all members sending at 10 a
+  second in the same instant, less what the limit dropped). A phone on a
+  slow link was not measured; it now gets three times the traffic.
 - **Memory.** Only a race of 4 had been measured (109.3 of 256 MiB, 2026-11-13
   ninth); the 20-socket flood peaked at 228.7. The race rows below peak at
   about 147 MiB, one race or two.
