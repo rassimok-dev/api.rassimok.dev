@@ -22,6 +22,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.postgresql.ds.PGSimpleDataSource;
 
+import javax.sql.DataSource;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -34,6 +35,7 @@ import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -104,6 +106,10 @@ class SocketGuardsTest {
     private static final String FORBIDDEN = "HTTP/1.1 403 Forbidden";
     private static final String UNAUTHORIZED = "HTTP/1.1 401 Unauthorized";
     private static final String UPGRADE_REQUIRED = "HTTP/1.1 426 Upgrade Required";
+    private static final String SERVICE_UNAVAILABLE = "HTTP/1.1 503 Service Unavailable";
+    // Between two resets as the session lookups return, so twenty resets
+    // spread over about 25 ms: before, during and after the upgrades.
+    private static final long RESET_STEP_MILLIS = 1;
     private static final String END_OF_HEADERS = "\r\n\r\n";
     private static final String KEY = "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
     private static final String VERSION_13 = "Sec-WebSocket-Version: 13\r\n";
@@ -112,6 +118,13 @@ class SocketGuardsTest {
     // Long enough for a second handshake on the same connection to get
     // through its session lookup before the client closes.
     private static final long SECOND_HANDSHAKE_MILLIS = 500;
+    // Deep enough to overflow a JVM event loop's stack on some platforms
+    // if each one were answered; the catch rate varies (see CHANGELOG).
+    private static final int QUEUED_HANDSHAKES = 8000;
+    private static final int QUEUE_ROUNDS = 5;
+    // For the server to read the whole queue before the reset, and to see
+    // the reset before the lookup returns.
+    private static final long QUEUE_SETTLE_MILLIS = 500;
 
     private static Vertx vertx;
     private static WebSocketClient client;
@@ -530,8 +543,9 @@ class SocketGuardsTest {
         assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
-    // A client that leaves during its session lookup must not stay counted,
-    // or 20 such handshakes would refuse every later socket.
+    // A client that leaves during its session lookup must not stay counted
+    // once the lookup returns, or 20 such handshakes would refuse every
+    // later socket.
     @ParameterizedTest
     @MethodSource("routes")
     void shouldOpenSocketsUpToCap_whenConnect_givenHandshakesAbandonedDuringLookup(SocketRoute route)
@@ -543,6 +557,129 @@ class SocketGuardsTest {
             // One at a time, so each one finds room and starts its lookup.
             Thread.sleep(PAUSE_MILLIS);
         }
+
+        // when
+        int openSockets = openSocketsUpToCap(route);
+
+        // then
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+    }
+
+    // The test's transaction locks the session table, so every lookup waits.
+    // A lookup keeps its slot until it returns, also once its client has
+    // gone, so 20 abandoned handshakes leave no room for a 21st.
+    @ParameterizedTest
+    @MethodSource("routes")
+    void shouldRefuseHandshake_whenConnect_givenCapOfHandshakesAbandonedDuringSlowLookup(SocketRoute route)
+            throws Exception {
+        // given
+        SocketRoute.Seat seat = route.newSeat();
+        PGSimpleDataSource dataSource = database();
+
+        // when
+        long waitingLookups;
+        String statusLine;
+        try (Connection otherTransaction = dataSource.getConnection()) {
+            otherTransaction.setAutoCommit(false);
+            TestSql.execute(otherTransaction, "lock table session in access exclusive mode");
+            for (int i = 0; i < Rules.SOCKETS_OPEN_MAX; i++) {
+                sendUpgradeRequest(serverUri, seat).close();
+            }
+            waitingLookups = TestSql.awaitLockWaiters(dataSource, Rules.SOCKETS_OPEN_MAX);
+            try (Socket socket = sendUpgradeRequest(serverUri, seat)) {
+                statusLine = statusLine(readHead(socket));
+            }
+            otherTransaction.rollback();
+        }
+        int openSockets = openSocketsUpToCap(route);
+
+        // then
+        assertThat(waitingLookups, equalTo((long) Rules.SOCKETS_OPEN_MAX));
+        assertThat(statusLine, equalTo(SERVICE_UNAVAILABLE));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+    }
+
+    // A handshake queued behind one abandoned during its lookup must start no
+    // lookup of its own; with its valid cookie it would wait for the player table.
+    @ParameterizedTest
+    @MethodSource("routes")
+    void shouldStartNoLookup_whenConnect_givenHandshakeQueuedBehindOneAbandonedDuringLookup(SocketRoute route)
+            throws Exception {
+        // given
+        SocketRoute.Seat seat = route.newSeat();
+        SocketRoute.Seat unknownSeat = new SocketRoute.Seat("unknown", seat.path());
+        String requests = upgradeRequest(serverUri, ALLOWED_ORIGIN, unknownSeat, KEY + VERSION_13, "")
+                + upgradeRequest(serverUri, ALLOWED_ORIGIN, seat, KEY + VERSION_13, "");
+        PGSimpleDataSource dataSource = database();
+
+        // when
+        long waitingFirstLookups;
+        long waitingQueuedLookups;
+        try (Connection sessionLock = dataSource.getConnection();
+             Connection playerLock = dataSource.getConnection()) {
+            sessionLock.setAutoCommit(false);
+            playerLock.setAutoCommit(false);
+            TestSql.execute(sessionLock, "lock table session in access exclusive mode");
+            TestSql.execute(playerLock, "lock table player in access exclusive mode");
+            for (int i = 0; i < Rules.SOCKETS_OPEN_MAX; i++) {
+                writeOnNewConnection(serverUri, requests).close();
+            }
+            waitingFirstLookups = TestSql.awaitLockWaiters(dataSource, Rules.SOCKETS_OPEN_MAX);
+            sessionLock.rollback();
+            Thread.sleep(SECOND_HANDSHAKE_MILLIS);
+            waitingQueuedLookups = TestSql.lockWaiters(dataSource);
+            playerLock.rollback();
+        }
+        int openSockets = openSocketsUpToCap(route);
+
+        // then
+        assertThat(waitingFirstLookups, equalTo((long) Rules.SOCKETS_OPEN_MAX));
+        assertThat(waitingQueuedLookups, equalTo(0L));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+    }
+
+    // Answering a handshake routes the one queued behind it inside that call,
+    // so a deep queue behind an abandoned lookup must get no answers, or the
+    // event loop's stack overflows and slots are lost.
+    @ParameterizedTest
+    @MethodSource("routes")
+    void shouldOpenSocketsUpToCap_whenConnect_givenThousandsOfHandshakesQueuedBehindOneAbandonedDuringLookup(
+            SocketRoute route) throws Exception {
+        // given
+        SocketRoute.Seat seat = route.newSeat();
+        String requests = upgradeRequest(serverUri, ALLOWED_ORIGIN, seat, KEY + VERSION_13, "")
+                .repeat(1 + QUEUED_HANDSHAKES);
+        PGSimpleDataSource dataSource = database();
+
+        // when
+        List<Long> waitingLookups = new ArrayList<>();
+        for (int i = 0; i < QUEUE_ROUNDS; i++) {
+            try (Connection otherTransaction = dataSource.getConnection()) {
+                otherTransaction.setAutoCommit(false);
+                TestSql.execute(otherTransaction, "lock table session in access exclusive mode");
+                try (Socket socket = writeOnNewConnection(serverUri, requests)) {
+                    socket.setSoLinger(true, 0);
+                    waitingLookups.add(TestSql.awaitLockWaiters(dataSource, 1));
+                    Thread.sleep(QUEUE_SETTLE_MILLIS);
+                }
+                Thread.sleep(QUEUE_SETTLE_MILLIS);
+                otherTransaction.rollback();
+            }
+        }
+        int openSockets = openSocketsUpToCap(route);
+
+        // then
+        assertThat(waitingLookups, everyItem(equalTo(1L)));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+    }
+
+    @ParameterizedTest
+    @MethodSource("routes")
+    void shouldOpenSocketsUpToCap_whenConnect_givenHandshakesResetAsLookupsReturn(SocketRoute route)
+            throws Exception {
+        // given
+        List<SocketRoute.Seat> seats = route.newSeats(Rules.SOCKETS_OPEN_MAX);
+        resetAsLookupsReturn(serverUri, database(), seats);
 
         // when
         int openSockets = openSocketsUpToCap(route);
@@ -981,6 +1118,29 @@ class SocketGuardsTest {
     static Socket sendTwoUpgradeRequests(URI server, SocketRoute.Seat seat) throws IOException {
         String request = upgradeRequest(server, ALLOWED_ORIGIN, seat, KEY + VERSION_13, "");
         return writeOnNewConnection(server, request + request);
+    }
+
+    // The handshakes wait for the session table together. Once it is free,
+    // their lookups return at about the same time, and each client resets a
+    // little later than the one before.
+    static void resetAsLookupsReturn(URI server, DataSource dataSource, List<SocketRoute.Seat> seats)
+            throws Exception {
+        List<Socket> sockets = new ArrayList<>();
+        try (Connection otherTransaction = dataSource.getConnection()) {
+            otherTransaction.setAutoCommit(false);
+            TestSql.execute(otherTransaction, "lock table session in access exclusive mode");
+            for (SocketRoute.Seat seat : seats) {
+                Socket socket = sendUpgradeRequest(server, seat);
+                socket.setSoLinger(true, 0);
+                sockets.add(socket);
+            }
+            TestSql.awaitLockWaiters(dataSource, seats.size());
+            otherTransaction.rollback();
+        }
+        for (Socket socket : sockets) {
+            Thread.sleep(RESET_STEP_MILLIS);
+            socket.close();
+        }
     }
 
     private static Socket sendRequest(URI server, SocketRoute.Seat seat, String handshakeHeaders, String body)
