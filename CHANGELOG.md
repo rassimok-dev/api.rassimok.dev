@@ -26,13 +26,30 @@ back changes for a client that leaves during its lookup.
   slots, and every further handshake gets 503 on the event loop, with no
   worker thread and no database read. For a client that stays nothing
   changes: its slot was already taken before the lookup.
-- **Handshakes queued behind an abandoned one start no lookup.** Vert.x
-  routes a request queued behind another on the same connection even
-  after the connection has closed (the sixth review counted 540 session
-  reads for 5 connections of 100 queued handshakes each). `takeSlot` now
-  reports no slot when the connection had already closed: its close
-  listener runs at once and gives the slot back. So such a handshake gets
-  503 and no lookup, instead of a lookup outside the cap.
+- **Handshakes queued behind an abandoned one get no answer and start no
+  lookup.** Vert.x routes a request queued behind another on the same
+  connection even after the connection has closed (the sixth review
+  counted 540 session reads for 5 connections of 100 queued handshakes
+  each). `upgrade` now gives a handshake on a connection that has already
+  closed no slot, no lookup and no answer, not even an `end()`. Ending a
+  response makes Vert.x route the next queued request inside that call,
+  so with no `end()` nothing behind it is routed, and the queue goes with
+  the connection. The first version of this change answered such a
+  handshake 503 instead (`takeSlot` reported no slot on a closed
+  connection). The 2026-11-17 security review showed the cost: each 503
+  routed the next handshake inside its own `end()`, one stack level per
+  queued handshake, and on the JVM 8,000 of them behind one abandoned
+  lookup overflowed the event loop's stack. A `StackOverflowError`
+  between taking a slot and giving it back lost the slot for good (5
+  slots in 12 rounds, no log line). The native binary at 256 MiB lost
+  none up to its memory limit, but that margin came from its stack and
+  frame sizes, not from the code. A 503 could not reach a client that
+  has gone anyway. `takeSlot` still reports no slot on a closed
+  connection, but `upgrade` now stops such a connection before it.
+  The refusals on the event loop (400, 426, 503, 403) of handshakes
+  pipelined on a connection that stays open still route the next one
+  inside their `end()` and nest the same way; main did the same before
+  this change, and it is left for a follow-up.
 - **No "Result is already complete" ERROR.** After `toWebSocket()` the
   check replaces the request's exception handler, which Vert.x 4.5 had set
   to fail the upgrade, with one that does nothing. A close in the one
@@ -72,11 +89,13 @@ back changes for a client that leaves during its lookup.
   contract are unchanged.
 
 - **Measured on the native binary** of this branch (sha256 `bf4e2af9...`,
-  built from the final `src/main`, the binary the 302 native tests ran
-  against), and for comparison on a native binary of main's socket code
-  (`4427cbb6...`, found in the checkout's `target/`, dated 2026-11-16
-  20:30, its source tree not recorded; its strings hold RAS-39's
-  `klad_oauth`, so it was built after RAS-72, which last changed
+  built from the `src/main` of the first version, before the closed check
+  in `upgrade`; not measured again, since that check changes only what a
+  handshake on a closed connection gets, and the flood below sends one
+  handshake per connection), and for comparison on a native binary of
+  main's socket code (`4427cbb6...`, found in the checkout's `target/`,
+  dated 2026-11-16 20:30, its source tree not recorded; its strings hold
+  RAS-39's `klad_oauth`, so it was built after RAS-72, which last changed
   `WebSocketHandshakeCheck`, `OpenSockets`, `Sessions` and `SocketSender`
   on main). Local Docker only, never production: the server at `--memory
   256m --memory-swap 256m --cpus 1`, a throwaway `postgres:18` with
@@ -121,7 +140,7 @@ back changes for a client that leaves during its lookup.
 
 ### Tests
 
-- `SocketGuardsTest` (+3, so `SocketGuardsIT` runs them natively; each
+- `SocketGuardsTest` (+4, so `SocketGuardsIT` runs them natively; each
   ends by opening the whole cap at once):
   - `shouldRefuseHandshake_whenConnect_givenCapOfHandshakesAbandonedDuringSlowLookup`:
     the test's own transaction locks the `session` table, so every lookup
@@ -133,8 +152,12 @@ back changes for a client that leaves during its lookup.
     behind it in the same write, one with a valid cookie, then close. The
     first waits for the locked `session` table; once that is free, the
     queued one would read the session and then wait for the also locked
-    `player` table. No statement waits there afterwards; with the old
-    `takeSlot` return, 20 did.
+    `player` table. No statement waits there afterwards; with neither the
+    closed check in `upgrade` nor the `takeSlot` return, 20 did.
+  - `shouldOpenSocketsUpToCap_whenConnect_givenThousandsOfHandshakesQueuedBehindOneAbandonedDuringLookup`:
+    5 rounds of one handshake waiting for the locked `session` table with
+    8,000 more behind it in the same write; the client resets, then the
+    lock is freed. Each round sees one lookup waiting.
   - `shouldOpenSocketsUpToCap_whenConnect_givenHandshakesResetAsLookupsReturn`:
     20 handshakes wait for the locked `session` table together; once it is
     free, the clients reset one after another, 1 ms apart, so the resets
@@ -157,10 +180,16 @@ back changes for a client that leaves during its lookup.
   failed every run (3 of 3), with members shown connected (with the check,
   16 to 17 upgrades in 5 rounds completed on a closed connection and were
   not opened); with the close listener giving the slot back during a
-  lookup, the slow-lookup test got no answer; with the old `takeSlot`
-  return, the queued-handshake test saw 20 lookups waiting.
-- Runs: `./mvnw test` 1,151 JVM tests (1,147 before), and in the
-  Mandrel Linux container 302 native tests (299 before), all passing.
+  lookup, the slow-lookup test got no answer. Without the closed check in
+  `upgrade`, the deep-queue test lost a slot in 2 of 3 runs (a seat got
+  503 until the deadline, nothing logged); on the JVM only, as
+  the native binary lost none in the review. Without that check and with
+  the old `takeSlot` return as well, the queued-handshake test saw 20
+  lookups waiting; with the `takeSlot` check alone (the first version) it
+  passed.
+- Runs: `./mvnw test` 1,152 JVM tests (1,147 before), and in the
+  Mandrel Linux container 303 native tests (299 before) against a binary
+  of the final `src/main` (sha256 `eb4a2a69...`), all passing.
 
 ### Decisions worth not relitigating
 
@@ -174,8 +203,16 @@ back changes for a client that leaves during its lookup.
   A lookup waits at most Agroal's acquisition timeout for a pooled
   connection (5 s, the quarkus-agroal 3.39.3 default, not set here), but a
   query on a database connection that hangs is not bounded in the app
-  (pgjdbc 42.7.13 has no socket timeout by default). The database hanging
-  stops REST as well (not tested).
+  (pgjdbc 42.7.13 has no socket timeout by default). A full database hang
+  stops REST as well; on a partial hang (a few pooled connections stuck
+  mid-query) each stuck lookup keeps its slot until the instance restarts,
+  while REST goes on with the rest of Agroal's pool of 50 (`max-size` is
+  not set here). Twenty stuck lookups refuse every handshake with 503
+  while `/status` and the room poll still answer. Not tested; read from
+  the source in the 2026-11-17 review, which rated it unlikely: the
+  lookups are two indexed reads, and nothing on a serving path takes a
+  table lock. A bound (a pgjdbc `socketTimeout`, which would bound REST
+  and Flyway too) is a decision for the user, not taken here.
 - **The no-op handler depends on the request wrappers passing it on.**
   Vert.x Web's and Quarkus's own wrappers in front of the request today
   hand `exceptionHandler` to Vert.x's request (read in vertx-web 4.5.33 and
@@ -184,7 +221,11 @@ back changes for a client that leaves during its lookup.
   same-site cookie setting or a shutdown timeout (`VertxHttpRecorder`),
   none of which is set, and in dev mode for the Dev UI's access log, so
   `quarkus:dev` can still log the ERROR. If one is set later, the ERROR
-  comes back, and `AbandonedHandshakeLogTest` fails.
+  comes back (log noise only: the slot still comes back, and the closed
+  check in the upgrade callback still keeps the socket from opening).
+  `AbandonedHandshakeLogTest` fails only if the setting also applies to
+  the test profile; a `%prod`-only setting, such as
+  `%prod.quarkus.shutdown.timeout`, is not caught.
 - **Upstream.** Vert.x's `Http1xServerConnection.createWebSocket` should
   complete the upgrade with `tryComplete`; 4.5.35 still calls `complete`
   (sixth review). Not reported from here.

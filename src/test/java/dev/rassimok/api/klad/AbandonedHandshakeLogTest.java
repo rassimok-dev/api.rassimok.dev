@@ -74,12 +74,9 @@ class AbandonedHandshakeLogTest {
         assertThat(warnings, empty());
     }
 
-    // A reset in the moment after the upgrade began made Vert.x log "Result
-    // is already complete" with a stack trace. Vert.x reads the network only
-    // between batches of tasks, so on an idle test server a reset almost
-    // never lands there; tasks spinning on every event loop make room for
-    // it, as on a busy instance. Such an upgrade still completes, and opened,
-    // its socket would count as connected in the race with no close to come.
+    // Busy event loops let a reset land between toWebSocket() and the handshake,
+    // which logged "Result is already complete"; opened, such a socket would
+    // show its member connected with no close to come.
     @Test
     void shouldLogNoWarningAndLeaveNoMemberConnected_whenConnect_givenHandshakesResetAsLookupsReturnOnBusyServer()
             throws Exception {

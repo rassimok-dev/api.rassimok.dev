@@ -80,6 +80,9 @@ public class WebSocketHandshakeCheck {
         // instance or a foreign page never takes a worker thread.
         if (!headers.contains(HttpHeaders.UPGRADE, HttpHeaders.WEBSOCKET, true)) {
             context.next();
+        } else if (hasClosed(connection)) {
+            // No answer: ending a response routes the request queued behind it
+            // inside that call, so thousands queued would nest until the stack ends.
         } else if (holdsSlot(connection)) {
             // Sent right behind a handshake, and routed once that one upgraded.
             // The connection speaks WebSocket now, so no HTTP answer fits, and
@@ -125,11 +128,9 @@ public class WebSocketHandshakeCheck {
         return headers.contains(HttpHeaders.TRANSFER_ENCODING) || (null != contentLength && !"0".equals(contentLength));
     }
 
-    // A slot belongs to a connection and comes back once: at a refusal, when
-    // the socket or the connection closes, or, for a connection that closed
-    // during its session lookup, when the lookup returns. The connection's
-    // close also covers any path that ends in no refusal and no socket, such
-    // as an upgrade that never ends.
+    // A slot belongs to a connection and comes back once: at a refusal, or at
+    // the socket's or the connection's close (during a lookup, when it returns).
+    // The connection's close also covers an upgrade that never ends.
     private boolean takeSlot(HttpConnection connection) {
         boolean hasSlot = openSockets.tryOpen();
         if (hasSlot && null == slotHolders.put(connection, true)) {
@@ -143,8 +144,7 @@ public class WebSocketHandshakeCheck {
             });
         }
         // On a connection that has already closed, the listener above ran at
-        // once and gave the slot back. Handshakes sent behind one another are
-        // routed there too, and none of them may start a lookup.
+        // once and gave the slot back, and no lookup may start.
         return hasSlot && holdsSlot(connection);
     }
 

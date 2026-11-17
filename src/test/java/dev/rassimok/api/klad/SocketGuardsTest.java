@@ -118,6 +118,12 @@ class SocketGuardsTest {
     // Long enough for a second handshake on the same connection to get
     // through its session lookup before the client closes.
     private static final long SECOND_HANDSHAKE_MILLIS = 500;
+    // Deep enough to overflow an event loop's stack if each one were answered.
+    private static final int QUEUED_HANDSHAKES = 8000;
+    private static final int QUEUE_ROUNDS = 5;
+    // For the server to read the whole queue before the reset, and to see
+    // the reset before the lookup returns.
+    private static final long QUEUE_SETTLE_MILLIS = 500;
 
     private static Vertx vertx;
     private static WebSocketClient client;
@@ -592,12 +598,8 @@ class SocketGuardsTest {
         assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
-    // Vert.x routes a handshake queued behind another on the same connection
-    // even after the connection closed. The first one, with an unknown
-    // cookie, waits for the session table; the queued one, with a valid
-    // cookie, would read the session and then wait for the player table.
-    // Once the first returns, the queued one must start no lookup, or a
-    // client could queue lookups past the cap.
+    // A handshake queued behind one abandoned during its lookup must start no
+    // lookup of its own; with its valid cookie it would wait for the player table.
     @ParameterizedTest
     @MethodSource("routes")
     void shouldStartNoLookup_whenConnect_givenHandshakeQueuedBehindOneAbandonedDuringLookup(SocketRoute route)
@@ -632,6 +634,41 @@ class SocketGuardsTest {
         // then
         assertThat(waitingFirstLookups, equalTo((long) Rules.SOCKETS_OPEN_MAX));
         assertThat(waitingQueuedLookups, equalTo(0L));
+        assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
+    }
+
+    // Answering a handshake routes the one queued behind it inside that call,
+    // so a deep queue behind an abandoned lookup must get no answers, or the
+    // event loop's stack overflows and slots are lost.
+    @ParameterizedTest
+    @MethodSource("routes")
+    void shouldOpenSocketsUpToCap_whenConnect_givenThousandsOfHandshakesQueuedBehindOneAbandonedDuringLookup(
+            SocketRoute route) throws Exception {
+        // given
+        SocketRoute.Seat seat = route.newSeat();
+        String requests = upgradeRequest(serverUri, ALLOWED_ORIGIN, seat, KEY + VERSION_13, "")
+                .repeat(1 + QUEUED_HANDSHAKES);
+        PGSimpleDataSource dataSource = database();
+
+        // when
+        List<Long> waitingLookups = new ArrayList<>();
+        for (int i = 0; i < QUEUE_ROUNDS; i++) {
+            try (Connection otherTransaction = dataSource.getConnection()) {
+                otherTransaction.setAutoCommit(false);
+                TestSql.execute(otherTransaction, "lock table session in access exclusive mode");
+                try (Socket socket = writeOnNewConnection(serverUri, requests)) {
+                    socket.setSoLinger(true, 0);
+                    waitingLookups.add(TestSql.awaitLockWaiters(dataSource, 1));
+                    Thread.sleep(QUEUE_SETTLE_MILLIS);
+                }
+                Thread.sleep(QUEUE_SETTLE_MILLIS);
+                otherTransaction.rollback();
+            }
+        }
+        int openSockets = openSocketsUpToCap(route);
+
+        // then
+        assertThat(waitingLookups, everyItem(equalTo(1L)));
         assertThat(openSockets, equalTo(Rules.SOCKETS_OPEN_MAX));
     }
 
