@@ -15,13 +15,15 @@ class RunRequestTest {
                 new RunRequest(0, 0, 0),
                 new RunRequest(1, 120, 600),
                 new RunRequest(5, 10_000_000, 3000),
-                new RunRequest(5, 0, 2_160_000));
+                new RunRequest(5, 0, 2_160_000),
+                new RunRequest(8, 0, 4800));
     }
 
     static Stream<RunRequest> invalidRuns() {
         return Stream.of(
                 new RunRequest(-1, 0, 0),
-                new RunRequest(6, 0, 3600),
+                new RunRequest(9, 0, 5400),
+                new RunRequest(8, 0, 4799),
                 new RunRequest(null, 0, 0),
                 new RunRequest(0, -1, 0),
                 new RunRequest(0, 10_000_001, 0),

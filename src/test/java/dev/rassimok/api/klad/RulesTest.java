@@ -64,7 +64,8 @@ class RulesTest {
                 .toList();
 
         // then
-        assertThat(revisions, equalTo(List.of(1, 1, 1, 1, 1)));
+        assertThat(revisions, equalTo(List.of(2, 2, 2, 2, 2, 1, 1, 1)));
+        assertThat(Rules.LEVEL_REVISIONS.size(), equalTo(Rules.LEVEL_MAX));
     }
 
     @ParameterizedTest
@@ -77,9 +78,20 @@ class RulesTest {
         assertThat(isCurrentRevision, equalTo(true));
     }
 
+    // Revision 2 of a rewritten level, revision 1 of a new one.
+    @ParameterizedTest
+    @CsvSource({"1, 2", "5, 2", "6, 1", "8, 1"})
+    void shouldAccept_whenIsCurrentRevision_givenRevisionOfLevelsRelease(int level, int revision) {
+        // when
+        boolean isCurrentRevision = Rules.isCurrentRevision(level, revision);
+
+        // then
+        assertThat(isCurrentRevision, equalTo(true));
+    }
+
     // An empty value is null: a missing revision or level.
     @ParameterizedTest
-    @CsvSource({"1, 0", "1, 2", "5, 2", "1, ", ", 1", "0, 1", "6, 1"})
+    @CsvSource({"1, 0", "1, 1", "1, 3", "5, 1", "5, 3", "6, 2", "8, 0", "8, 2", "1, ", ", 1", "0, 1", "9, 1"})
     void shouldReject_whenIsCurrentRevision_givenOtherRevisionOrUnknownLevel(Integer level, Integer revision) {
         // when
         boolean isCurrentRevision = Rules.isCurrentRevision(level, revision);

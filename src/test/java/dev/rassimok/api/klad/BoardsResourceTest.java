@@ -172,6 +172,66 @@ class BoardsResourceTest {
                 .body("entries", contains(Map.of("rank", 1, "nick", "Current", "guest", true, "chests", 3)));
     }
 
+    // Revision 1 rows, as real players left them on the old layouts.
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2, 3, 4, 5})
+    void shouldCountOnlyRevisionTwo_whenGetBoards_givenRevisionOneClearsOfRewrittenLevelStored(int level)
+            throws SQLException {
+        // given
+        String current = TestPlayers.createGuest("Current", Rules.KIND_HUMAN);
+        String veteran = TestPlayers.createGuest("Veteran", Rules.KIND_HUMAN);
+        clear(current, level, Rules.SHAPE_PORTRAIT, 900, 3, 5);
+        insertClear(current, level, Rules.SHAPE_PORTRAIT, 1, 600, 5, 5);
+        insertClear(veteran, level, Rules.SHAPE_PORTRAIT, 1, 600, 5, 5);
+
+        // when
+        ValidatableResponse levelBoard = given().queryParam("level", level).queryParam("shape", Rules.SHAPE_PORTRAIT)
+                .when().get("/boards/level").then();
+        ValidatableResponse chests = given().when().get("/boards/chests").then();
+
+        // then
+        levelBoard.statusCode(200)
+                .body("fastest", contains(Map.of("rank", 1, "nick", "Current", "guest", true, "ticks", 900)))
+                .body("chests", contains(Map.of("rank", 1, "nick", "Current", "guest", true,
+                        "chests", 3, "chestsTotal", 5, "ticks", 900)));
+        chests.statusCode(200)
+                .body("entries", contains(Map.of("rank", 1, "nick", "Current", "guest", true, "chests", 3)));
+    }
+
+    @Test
+    void shouldSumEveryLevel_whenGetChests_givenClearOfEachLevelAtItsRevision() throws SQLException {
+        // given
+        String explorer = TestPlayers.createGuest("Explorer", Rules.KIND_HUMAN);
+        for (int level = 1; level <= 8; level++) {
+            clear(explorer, level, Rules.SHAPE_LANDSCAPE, 900, level, 10);
+        }
+        insertClear(explorer, 1, Rules.SHAPE_PORTRAIT, 1, 900, 50, 50);
+
+        // when
+        ValidatableResponse chests = given().when().get("/boards/chests").then();
+        ValidatableResponse highestLevel = given().queryParam("level", 8).queryParam("shape", Rules.SHAPE_LANDSCAPE)
+                .when().get("/boards/level").then();
+
+        // then
+        chests.statusCode(200)
+                .body("entries", contains(Map.of("rank", 1, "nick", "Explorer", "guest", true, "chests", 36)));
+        highestLevel.statusCode(200)
+                .body("fastest", contains(Map.of("rank", 1, "nick", "Explorer", "guest", true, "ticks", 900)))
+                .body("chests", contains(Map.of("rank", 1, "nick", "Explorer", "guest", true,
+                        "chests", 8, "chestsTotal", 10, "ticks", 900)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 5, 6, 8})
+    void shouldAnswerEmptyBoard_whenGetLevel_givenLevelWithoutClears(int level) {
+        // when
+        ValidatableResponse response = given().queryParam("level", level).queryParam("shape", Rules.SHAPE_LANDSCAPE)
+                .when().get("/boards/level").then();
+
+        // then
+        response.statusCode(200).body("fastest", empty()).body("chests", empty());
+    }
+
     @Test
     void shouldRefuseAndChangeNoBoard_whenSubmitClear_givenForgedRevision() throws SQLException {
         // given
@@ -310,7 +370,7 @@ class BoardsResourceTest {
     @ValueSource(strings = {
             "shape=portrait",
             "level=0&shape=portrait",
-            "level=6&shape=portrait",
+            "level=9&shape=portrait",
             "level=one&shape=portrait",
             "level=1.5&shape=portrait",
             "level=99999999999&shape=portrait",

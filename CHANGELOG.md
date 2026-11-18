@@ -3,6 +3,125 @@
 Dated entries, newest first. Written for a reader picking this up cold —
 or a future session needing to know what already exists and why.
 
+## 2026-11-18 - Klad levels 1 to 8: levels 1 to 5 at revision 2, levels 6 to 8 new
+
+The site's release branch `release/klad-levels` gives levels 1 to 5 new
+layouts (revision 2) and adds levels 6, 7 and 8 (revision 1; RAS-69,
+RAS-70, RAS-71). The API accepts only levels and revisions it knows
+(RAS-62), so `Rules.LEVEL_MAX` goes from 5 to 8 and `Rules.LEVEL_REVISIONS`
+from `List.of(1, 1, 1, 1, 1)` to `List.of(2, 2, 2, 2, 2, 1, 1, 1)`. Every
+bound already reads these two constants, so no other main code changes,
+and no request or answer changes its shape.
+
+- **What is accepted now.** `POST /clears`: levels 1 to 8, each only at
+  its current revision; revision 1 of levels 1 to 5, any later revision
+  and level 9 get 400 `invalid_result`. `POST /runs`: `levelsCleared` 0
+  to 8 (still at least 600 ticks per cleared level), 9 gets 400.
+  `GET /boards/level`: levels 1 to 8, 400 `invalid_query` for 9.
+  `POST /rooms/<id>/level`: 1 to 8, 400 `invalid_level` for 9. The chests
+  board sums levels 1 to 8, each at its current revision.
+- **The two constants must agree.** `Rules.currentRevision` reads the list
+  by index: a list shorter than `LEVEL_MAX` throws for the last levels, a
+  longer one leaves revisions nobody reads. `RulesTest` compares the
+  revisions of levels 1 to `LEVEL_MAX` with the whole expected list and
+  the list's size with `LEVEL_MAX`, so either mistake fails it.
+- **Held until the site release (user, 2026-11-18, RAS-62 question 1 a).**
+  The rewritten and new levels ship as one release. The level tickets
+  collect on the site branch, the user plays its Pages preview, and only
+  after the user's OK does this change merge (a merge here deploys),
+  right before the site release merges to `main`. The revision check is
+  an exact match, so from this deploy until the site release is live the
+  live game's clears of levels 1 to 5 (still revision 1) get 400 and are
+  lost; the hold keeps that window to minutes. Not chosen: one small API
+  change per level ticket (eight deploys and reviews, the boards reset
+  one level at a time), or accepting two revisions of a level during a
+  roll-out (a contract change, and clears of the old layouts stored but
+  never shown).
+- **The boards of the rewritten levels start empty (question 2 a).**
+  Clears of revision 1 stay in `level_clear`, unseen, and leave the chests
+  total, as the revision rule of 2026-11-13 already does: on a new layout
+  an old time means nothing. No row is deleted and there is no migration:
+  `level_clear.level`, `level_clear.revision` and
+  `game_run.levels_cleared` are plain integers without a check (`V2`).
+  Not chosen: an archive board for old revisions (a new board parameter
+  and a site ticket), carrying the old rows over (times on different
+  layouts ranked together) or deleting them (real players' data).
+- **The records board stays as it is (question 3 a).** `game_run` has no
+  revision, so runs on the old five levels stay on it next to runs on the
+  new eight; a full new run outranks them by `levelsCleared`. Telling
+  them apart would need a migration, a new `POST /runs` field and a site
+  ticket.
+- **Forged results gain three levels.** The API checks a clear against
+  bounds only and cannot tell a played clear from a forged one. Each
+  extra accepted level adds up to 100 chests per shape
+  (`CHESTS_TOTAL_MAX`) that one forger can put on the chests board, here
+  up to 600 more. Accepted because levels 6 to 8 ship in the same
+  release: no level is accepted before it can be played, and a played
+  level is open to the same forgery as levels 1 to 5 are today. The
+  records board is open to the same forgery (one forged 8-level run
+  outranks every run, since the board orders by levels cleared first),
+  accepted for the same reason.
+- **The run cap stays at 5 h.** `RUN_TICKS_MAX` (2,160,000 ticks, five
+  times the 1 h clear cap) was not raised with the level count. A full
+  8-level run above 5 h of game time is not expected, and a run over it
+  gets 400 while its clears are stored; revisit with real run times.
+  Raising it changes a limit in the contract, so it is the user's call.
+- **Native.** `Boards.CHESTS` is a `static final` string that
+  `currentRevisionRows()` builds from these constants when the class
+  initialises, which GraalVM may do at image build time. The values come
+  from constants, so the result is the same, and `KladRoundTripIT` reads
+  a level 8 clear in the chests total of the binary.
+- **Contract.** `docs/plans/2026-11-13-klad-api-contract.md` in the
+  workspace, sections 4 (`level` 1 to 8, `levelsCleared` 0 to 8, the
+  revisions) and 7 (a room's `level` 1 to 8), changes with this entry.
+
+### Tests
+
+- `RulesTest`: the revisions of levels 1 to 8 equal
+  `List.of(2, 2, 2, 2, 2, 1, 1, 1)`; revision 2 of levels 1 and 5 and
+  revision 1 of levels 6 and 8 are current (+4); revision 1 and 3 of a
+  rewritten level, revision 0 and 2 of a new one, level 0 and level 9 are
+  not (7 cases become 12, +5: the cases `1, 2`, `5, 2` and `6, 1` became
+  current and were replaced).
+- `ClearRequestTest`: clears of levels 1, 5, 6 and 8 at their revisions
+  pass (+4); level 9, revision 1 of levels 1 and 5 and revision 2 of level
+  8 fail (+4). The old level 6 case is now level 9 at revision 1, so it
+  fails for the level and not, as it would have, for level 1's revision.
+- `RunRequestTest`: 8 levels in 4,800 ticks pass (+1); 9 levels and 8
+  levels in 4,799 ticks fail (the old 6-level case became valid and is
+  now the 9-level one, +1).
+- `ResultsResourceTest`: `POST /clears` stores each of levels 1 to 8 at
+  its revision (+8); level 9, revision 1 of levels 1 and 5 and revision 2
+  of level 8 get 400 and store nothing (+3, the level 6 case is now level
+  9); a run of 8 levels is stored (+1); 9 levels and 8 levels in 4,799
+  ticks get 400 (+1, the 6-level case is now the 9-level one).
+- `BoardsResourceTest`: for each of levels 1 to 5, revision 1 rows of one
+  player and another are on neither the level board nor the chests total,
+  next to a revision 2 clear that is (+5); one player's clears of levels 1
+  to 8 sum to 36 chests, a revision 1 row of 50 chests left out, and level
+  8 has its board (+1); `GET /boards/level` answers an empty board for
+  levels 1, 5, 6 and 8 (+4) and 400 for 9 (was 6).
+- `RoomResourceTest` (and `RoomResourceIT`): the level the tests send is
+  8 (was 4), so the host test compares a whole room at level 8. A test of
+  its own would add a room, and rooms stay in memory for the whole run:
+  the first version did, and the JVM run reached the cap of 100 rooms
+  (two `SocketGuardsTest` cases got 429 creating theirs). Level 9 gets
+  400 `invalid_level` (was 6; the test is renamed from
+  `...givenLevelOutsideOneToFive` to `...givenLevelOutsideOneToEight`,
+  because the old name would be false).
+- `KladRoundTripTest` (and `KladRoundTripIT`): the round trip's run
+  clears 8 levels (was 5); a clear of level 1 at revision 2 and of level
+  8 at revision 1 show on the level 8 board and add up on the chests
+  board by nick (+1); revision 1 of levels 1 and 5, revision 2 of level 8
+  and level 9 get 400 (+4).
+- `RoomStoreTest` and `LoginResourceTest` use `Rules.LEVEL_MAX` and pass
+  unchanged with 8.
+- Runs: `./mvnw test` 1,199 JVM tests (1,152 before), and in the Mandrel
+  Linux container 308 native tests (303 before; `KladRoundTripIT` 9,
+  `RoomResourceIT` 143) against a binary of the final `src/main`
+  (sha256 `2637ec2752efb23a...`), all passing. The production check
+  (one clear per level through the site's proxy) runs after the merge.
+
 ## 2026-11-17 - Socket guards: session lookups held to the cap, no upgrade-race ERROR, the per-player gap accepted
 
 The RAS-29 round-6 review left three socket items as minors, and RAS-32

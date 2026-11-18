@@ -6,6 +6,7 @@ import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -53,6 +54,27 @@ class ResultsResourceTest {
         assertThat(stored, equalTo(List.of(2, Rules.SHAPE_PORTRAIT, Rules.currentRevision(2), 1500, 4, 7, true)));
     }
 
+    // Revision 2 of a rewritten level, revision 1 of a new one.
+    @ParameterizedTest
+    @CsvSource({"1, 2", "2, 2", "3, 2", "4, 2", "5, 2", "6, 1", "7, 1", "8, 1"})
+    void shouldStoreClear_whenSubmitClear_givenLevelAtRevisionOfLevelsRelease(int level, int revision)
+            throws SQLException {
+        // given
+        String token = TestPlayers.createGuest("Releaser", Rules.KIND_HUMAN);
+
+        // when
+        ValidatableResponse response = submit("/clears", token, Map.of("level", level, "shape",
+                Rules.SHAPE_LANDSCAPE, "revision", revision, "ticks", 900, "chests", 1, "chestsTotal", 2));
+
+        // then
+        response.statusCode(201).body("", equalTo(Map.of()));
+        List<Object> stored = TestSql.row(dataSource, """
+                select level, shape, revision, ticks, chests, chests_total, now() - created_at < interval '1 minute'
+                from level_clear where player_id = ?
+                """, playerId(token));
+        assertThat(stored, equalTo(List.of(level, Rules.SHAPE_LANDSCAPE, revision, 900, 1, 2, true)));
+    }
+
     @Test
     void shouldStoreClearAndResendCookie_whenSubmitClear_givenSessionOlderThanADay() throws SQLException {
         // given
@@ -86,11 +108,32 @@ class ResultsResourceTest {
         assertThat(stored, equalTo(List.of(2, 4200, 9000, true)));
     }
 
+    @Test
+    void shouldStoreRun_whenSubmitRun_givenEveryLevelCleared() throws SQLException {
+        // given
+        String token = TestPlayers.createGuest("Finisher", Rules.KIND_HUMAN);
+
+        // when
+        ValidatableResponse response = submit("/runs", token, Map.of("levelsCleared", 8, "score", 900,
+                "ticks", 4800));
+
+        // then
+        response.statusCode(201).body("", equalTo(Map.of()));
+        List<Object> stored = TestSql.row(dataSource, """
+                select levels_cleared, score, ticks_total, now() - finished_at < interval '1 minute'
+                from game_run where player_id = ?
+                """, playerId(token));
+        assertThat(stored, equalTo(List.of(8, 900, 4800, true)));
+    }
+
     // %1$d is the current revision of level 1, %2$d the one after it.
     static Stream<String> invalidClears() {
         int revision = Rules.currentRevision(1);
         return Stream.of(
-                "{\"level\":6,\"shape\":\"portrait\",\"revision\":%1$d,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":9,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":1,\"shape\":\"portrait\",\"revision\":1,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":5,\"shape\":\"landscape\",\"revision\":1,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
+                "{\"level\":8,\"shape\":\"portrait\",\"revision\":2,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
                 "{\"level\":1,\"shape\":\"square\",\"revision\":%1$d,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
                 "{\"level\":1,\"shape\":\"portrait\",\"revision\":%2$d,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
                 "{\"level\":1,\"shape\":\"portrait\",\"revision\":0,\"ticks\":900,\"chests\":0,\"chestsTotal\":1}",
@@ -123,7 +166,8 @@ class ResultsResourceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
-            "{\"levelsCleared\":6,\"score\":0,\"ticks\":4000}",
+            "{\"levelsCleared\":9,\"score\":0,\"ticks\":6000}",
+            "{\"levelsCleared\":8,\"score\":100,\"ticks\":4799}",
             "{\"levelsCleared\":1,\"score\":10000001,\"ticks\":4000}",
             "{\"levelsCleared\":1,\"score\":-1,\"ticks\":4000}",
             "{\"levelsCleared\":5,\"score\":100,\"ticks\":2999}",
