@@ -23,8 +23,8 @@ and no request or answer changes its shape.
 - **The two constants must agree.** `Rules.currentRevision` reads the list
   by index: a list shorter than `LEVEL_MAX` throws for the last levels, a
   longer one leaves revisions nobody reads. `RulesTest` compares the
-  revisions of levels 1 to `LEVEL_MAX` with the whole expected list, so
-  either mistake fails it.
+  revisions of levels 1 to `LEVEL_MAX` with the whole expected list and
+  the list's size with `LEVEL_MAX`, so either mistake fails it.
 - **Held until the site release (user, 2026-11-18, RAS-62 question 1 a).**
   The rewritten and new levels ship as one release. The level tickets
   collect on the site branch, the user plays its Pages preview, and only
@@ -57,7 +57,15 @@ and no request or answer changes its shape.
   (`CHESTS_TOTAL_MAX`) that one forger can put on the chests board, here
   up to 600 more. Accepted because levels 6 to 8 ship in the same
   release: no level is accepted before it can be played, and a played
-  level is open to the same forgery as levels 1 to 5 are today.
+  level is open to the same forgery as levels 1 to 5 are today. The
+  records board is open to the same forgery (one forged 8-level run
+  outranks every run, since the board orders by levels cleared first),
+  accepted for the same reason.
+- **The run cap stays at 5 h.** `RUN_TICKS_MAX` (2,160,000 ticks, five
+  times the 1 h clear cap) was not raised with the level count. A full
+  8-level run above 5 h of game time is not expected, and a run over it
+  gets 400 while its clears are stored; revisit with real run times.
+  Raising it changes a limit in the contract, so it is the user's call.
 - **Native.** `Boards.CHESTS` is a `static final` string that
   `currentRevisionRows()` builds from these constants when the class
   initialises, which GraalVM may do at image build time. The values come

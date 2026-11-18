@@ -172,8 +172,7 @@ class BoardsResourceTest {
                 .body("entries", contains(Map.of("rank", 1, "nick", "Current", "guest", true, "chests", 3)));
     }
 
-    // Revision 1 rows, as real players left them on the layouts that levels 1
-    // to 5 had before the levels release.
+    // Revision 1 rows, as real players left them on the old layouts.
     @ParameterizedTest
     @ValueSource(ints = {1, 2, 3, 4, 5})
     void shouldCountOnlyRevisionTwo_whenGetBoards_givenRevisionOneClearsOfRewrittenLevelStored(int level)

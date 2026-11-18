@@ -65,6 +65,7 @@ class RulesTest {
 
         // then
         assertThat(revisions, equalTo(List.of(2, 2, 2, 2, 2, 1, 1, 1)));
+        assertThat(Rules.LEVEL_REVISIONS.size(), equalTo(Rules.LEVEL_MAX));
     }
 
     @ParameterizedTest
@@ -77,7 +78,7 @@ class RulesTest {
         assertThat(isCurrentRevision, equalTo(true));
     }
 
-    // Levels 1 to 5 were rewritten as revision 2; levels 6 to 8 are new.
+    // Revision 2 of a rewritten level, revision 1 of a new one.
     @ParameterizedTest
     @CsvSource({"1, 2", "5, 2", "6, 1", "8, 1"})
     void shouldAccept_whenIsCurrentRevision_givenRevisionOfLevelsRelease(int level, int revision) {

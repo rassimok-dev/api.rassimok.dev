@@ -20,7 +20,7 @@ import static org.hamcrest.Matchers.nullValue;
 /**
  * HTTP only, so the native integration test can run it against the binary.
  * Its own level and shape and the agent kind keep it apart from other tests'
- * data.
+ * data; the tests of levels 1 and 8 find their player by a unique nick.
  */
 @QuarkusTest
 class KladRoundTripTest {
@@ -96,8 +96,8 @@ class KladRoundTripTest {
         chests.statusCode(200).body("entries.nick", hasItem("RoundTrip"));
     }
 
-    // Level 1 was rewritten as revision 2, level 8 is new at revision 1. The
-    // chests board's SQL is built from these revisions when the class loads.
+    // The chests board's SQL is built from the revisions when the class
+    // loads, so the native binary must count both kinds.
     @Test
     void shouldCountRewrittenAndNewLevel_whenGetBoards_givenClearsAtRevisionsOfLevelsRelease() {
         // given

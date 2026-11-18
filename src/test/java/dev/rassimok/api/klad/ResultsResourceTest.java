@@ -54,7 +54,7 @@ class ResultsResourceTest {
         assertThat(stored, equalTo(List.of(2, Rules.SHAPE_PORTRAIT, Rules.currentRevision(2), 1500, 4, 7, true)));
     }
 
-    // Levels 1 to 5 were rewritten as revision 2; levels 6 to 8 are new.
+    // Revision 2 of a rewritten level, revision 1 of a new one.
     @ParameterizedTest
     @CsvSource({"1, 2", "2, 2", "3, 2", "4, 2", "5, 2", "6, 1", "7, 1", "8, 1"})
     void shouldStoreClear_whenSubmitClear_givenLevelAtRevisionOfLevelsRelease(int level, int revision)
@@ -68,9 +68,11 @@ class ResultsResourceTest {
 
         // then
         response.statusCode(201).body("", equalTo(Map.of()));
-        List<Object> stored = TestSql.row(dataSource, "select level, revision from level_clear where player_id = ?",
-                playerId(token));
-        assertThat(stored, equalTo(List.of(level, revision)));
+        List<Object> stored = TestSql.row(dataSource, """
+                select level, shape, revision, ticks, chests, chests_total, now() - created_at < interval '1 minute'
+                from level_clear where player_id = ?
+                """, playerId(token));
+        assertThat(stored, equalTo(List.of(level, Rules.SHAPE_LANDSCAPE, revision, 900, 1, 2, true)));
     }
 
     @Test
@@ -117,9 +119,11 @@ class ResultsResourceTest {
 
         // then
         response.statusCode(201).body("", equalTo(Map.of()));
-        List<Object> stored = TestSql.row(dataSource,
-                "select levels_cleared, score, ticks_total from game_run where player_id = ?", playerId(token));
-        assertThat(stored, equalTo(List.of(8, 900, 4800)));
+        List<Object> stored = TestSql.row(dataSource, """
+                select levels_cleared, score, ticks_total, now() - finished_at < interval '1 minute'
+                from game_run where player_id = ?
+                """, playerId(token));
+        assertThat(stored, equalTo(List.of(8, 900, 4800, true)));
     }
 
     // %1$d is the current revision of level 1, %2$d the one after it.
