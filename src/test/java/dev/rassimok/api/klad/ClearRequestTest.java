@@ -14,14 +14,22 @@ class ClearRequestTest {
         return Stream.of(
                 new ClearRequest(1, Rules.SHAPE_LANDSCAPE, Rules.currentRevision(1), 600, 0, 1),
                 new ClearRequest(5, Rules.SHAPE_PORTRAIT, Rules.currentRevision(5), 432_000, 100, 100),
-                new ClearRequest(3, Rules.SHAPE_PORTRAIT, Rules.currentRevision(3), 1500, 4, 7));
+                new ClearRequest(3, Rules.SHAPE_PORTRAIT, Rules.currentRevision(3), 1500, 4, 7),
+                new ClearRequest(1, Rules.SHAPE_PORTRAIT, 2, 900, 1, 2),
+                new ClearRequest(5, Rules.SHAPE_LANDSCAPE, 2, 900, 1, 2),
+                new ClearRequest(6, Rules.SHAPE_LANDSCAPE, 1, 900, 1, 2),
+                new ClearRequest(8, Rules.SHAPE_PORTRAIT, 1, 432_000, 100, 100));
     }
 
     static Stream<ClearRequest> invalidClears() {
         int revision = Rules.currentRevision(1);
         return Stream.of(
                 new ClearRequest(0, Rules.SHAPE_LANDSCAPE, revision, 600, 0, 1),
-                new ClearRequest(6, Rules.SHAPE_LANDSCAPE, revision, 600, 0, 1),
+                new ClearRequest(9, Rules.SHAPE_LANDSCAPE, 1, 600, 0, 1),
+                new ClearRequest(9, Rules.SHAPE_LANDSCAPE, 2, 600, 0, 1),
+                new ClearRequest(1, Rules.SHAPE_LANDSCAPE, 1, 600, 0, 1),
+                new ClearRequest(5, Rules.SHAPE_PORTRAIT, 1, 600, 0, 1),
+                new ClearRequest(8, Rules.SHAPE_PORTRAIT, 2, 600, 0, 1),
                 new ClearRequest(null, Rules.SHAPE_LANDSCAPE, revision, 600, 0, 1),
                 new ClearRequest(1, "square", revision, 600, 0, 1),
                 new ClearRequest(1, null, revision, 600, 0, 1),

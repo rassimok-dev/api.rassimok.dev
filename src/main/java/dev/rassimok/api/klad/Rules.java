@@ -19,11 +19,11 @@ final class Rules {
     static final String SHAPE_PORTRAIT = "portrait";
 
     static final int LEVEL_MIN = 1;
-    static final int LEVEL_MAX = 5;
+    static final int LEVEL_MAX = 8;
     // The current revision of each level, level 1 first. It must change
     // together with the revisions in the site's klad/levels.js; until the
     // API deploys, clears of a new revision are refused.
-    static final List<Integer> LEVEL_REVISIONS = List.of(1, 1, 1, 1, 1);
+    static final List<Integer> LEVEL_REVISIONS = List.of(2, 2, 2, 2, 2, 1, 1, 1);
 
     // 5 s at the engine's 120 ticks a second, below any real clear of a
     // level. Revise it once real clear times are known.

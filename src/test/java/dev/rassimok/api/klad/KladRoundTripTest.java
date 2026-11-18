@@ -4,7 +4,10 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -71,7 +74,7 @@ class KladRoundTripTest {
                 .when().post("/clears")
                 .then().statusCode(201).body("", equalTo(Map.of()));
         given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON)
-                .body(Map.of("levelsCleared", 5, "score", 10_000_000, "ticks", 3000))
+                .body(Map.of("levelsCleared", 8, "score", 10_000_000, "ticks", 4800))
                 .when().post("/runs")
                 .then().statusCode(201);
 
@@ -93,6 +96,46 @@ class KladRoundTripTest {
         chests.statusCode(200).body("entries.nick", hasItem("RoundTrip"));
     }
 
+    // Level 1 was rewritten as revision 2, level 8 is new at revision 1. The
+    // chests board's SQL is built from these revisions when the class loads.
+    @Test
+    void shouldCountRewrittenAndNewLevel_whenGetBoards_givenClearsAtRevisionsOfLevelsRelease() {
+        // given
+        String nick = TestPlayers.uniqueNick("Release");
+        String token = TestPlayers.createGuest(nick, Rules.KIND_AGENT);
+        submitClear(token, 1, 2, 100).statusCode(201);
+        submitClear(token, 8, 1, 90).statusCode(201);
+
+        // when
+        ValidatableResponse highestLevel = given()
+                .queryParam("kind", Rules.KIND_AGENT).queryParam("level", 8)
+                .queryParam("shape", Rules.SHAPE_PORTRAIT)
+                .when().get("/boards/level")
+                .then();
+        ValidatableResponse chests = given().queryParam("kind", Rules.KIND_AGENT).when().get("/boards/chests").then();
+
+        // then
+        highestLevel.statusCode(200)
+                .body("fastest.findAll { it.nick == '" + nick + "' }.ticks", equalTo(List.of(1300)));
+        chests.statusCode(200)
+                .body("entries.findAll { it.nick == '" + nick + "' }.chests", equalTo(List.of(190)));
+    }
+
+    // Revision 1 of a rewritten level, a future revision of a new level and a
+    // level above the highest.
+    @ParameterizedTest
+    @CsvSource({"1, 1", "5, 1", "8, 2", "9, 1"})
+    void shouldRefuse_whenSubmitClear_givenRevisionOrLevelOutsideLevelsRelease(int level, int revision) {
+        // given
+        String token = TestPlayers.createGuest("Outdated", Rules.KIND_AGENT);
+
+        // when
+        ValidatableResponse response = submitClear(token, level, revision, 1);
+
+        // then
+        response.statusCode(400).body("error", equalTo(ApiException.INVALID_RESULT));
+    }
+
     @Test
     void shouldForgetPlayer_whenDeletePlayer_givenRenamedGuest() {
         // given
@@ -110,5 +153,13 @@ class KladRoundTripTest {
         given().cookie(TestPlayers.COOKIE, token)
                 .when().get("/players/me")
                 .then().statusCode(401).body("error", equalTo(ApiException.NO_SESSION));
+    }
+
+    private static ValidatableResponse submitClear(String token, int level, int revision, int chests) {
+        return given().cookie(TestPlayers.COOKIE, token).contentType(ContentType.JSON)
+                .body(Map.of("level", level, "shape", Rules.SHAPE_PORTRAIT, "revision", revision,
+                        "ticks", 1300, "chests", chests, "chestsTotal", 100))
+                .when().post("/clears")
+                .then();
     }
 }

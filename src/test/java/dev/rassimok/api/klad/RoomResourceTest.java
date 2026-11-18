@@ -59,7 +59,9 @@ class RoomResourceTest {
     private static final String LOBBY = "lobby";
     private static final String STARTING = "starting";
     private static final String READY = "{\"ready\":true}";
-    private static final String LEVEL = "{\"level\":4,\"shape\":\"portrait\"}";
+    // The highest level, so the host test covers it without one more room
+    // toward the cap: the JVM run already comes close to it.
+    private static final String LEVEL = "{\"level\":8,\"shape\":\"portrait\"}";
     private static final String LINK_ONLY = "{\"listed\":false}";
     private static final String LEVEL_THREE = "level 3?";
     private static final String MESSAGE = "{\"text\":\"level 3?\"}";
@@ -560,7 +562,7 @@ class RoomResourceTest {
 
         // then
         response.statusCode(200).body("", equalTo(Map.of("id", id, "state", LOBBY, "host", Map.of("nick", HOST),
-                "players", List.of(withYou(member(HOST, 1, false, true))), "level", 4, "shape", Rules.SHAPE_PORTRAIT,
+                "players", List.of(withYou(member(HOST, 1, false, true))), "level", 8, "shape", Rules.SHAPE_PORTRAIT,
                 "size", Rules.ROOM_SIZE, "listed", true, "messages", List.of())));
     }
 
@@ -579,10 +581,10 @@ class RoomResourceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"{\"level\":0,\"shape\":\"portrait\"}", "{\"level\":6,\"shape\":\"portrait\"}",
+    @ValueSource(strings = {"{\"level\":0,\"shape\":\"portrait\"}", "{\"level\":9,\"shape\":\"portrait\"}",
             "{\"level\":1.5,\"shape\":\"portrait\"}", "{\"level\":\"3\",\"shape\":\"portrait\"}",
             "{\"shape\":\"portrait\"}", "{\"level\":99999999999,\"shape\":\"portrait\"}"})
-    void shouldAnswerInvalidLevel_whenLevel_givenLevelOutsideOneToFive(String body) {
+    void shouldAnswerInvalidLevel_whenLevel_givenLevelOutsideOneToEight(String body) {
         // when
         ValidatableResponse response = postJson(guest("Chooser"), "/rooms/" + UNKNOWN_ID + "/level", body);
 
